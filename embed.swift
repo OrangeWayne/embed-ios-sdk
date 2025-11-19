@@ -443,78 +443,9 @@ final class FloatingOverlayManager {
         for (index, rect) in rects.enumerated() {
             print("[FloatingOverlayManager]   Rect[\(index)] (WebView coords, ignored): \(rect)")
         }
-        return  // 直接返回，不使用 JavaScript 的座標
-        
-        // 以下代碼不會執行（保留作為參考）
-        guard let webView = webView,
-              let window = window else {
-            print("[FloatingOverlayManager] ❌ updateClickableRects failed: webView or window is nil")
-            return 
-        }
-        
-        // 將 WebView 座標系統轉換為 Window 座標系統
-        // 重要：由於 iframe 是 position: fixed，getBoundingClientRect() 返回的是視口座標
-        // 對於全螢幕 WebView，視口座標 = window 座標（不需要轉換）
-        var convertedRects: [CGRect] = []
-        let windowBounds = window.bounds
-        
-        for (index, rect) in rects.enumerated() {
-            print("[FloatingOverlayManager]   Rect[\(index)] (WebView coords from JS): \(rect)")
-            print("[FloatingOverlayManager]   Window bounds: \(windowBounds)")
-            
-            // 直接使用 JavaScript 返回的座標（已經是視口座標）
-            // 對於 fixed 元素，getBoundingClientRect() 應該返回正確的視口座標
-            let convertedRect = CGRect(
-                x: rect.origin.x,
-                y: rect.origin.y,
-                width: rect.width,
-                height: rect.height
-            )
-            
-            convertedRects.append(convertedRect)
-            print("[FloatingOverlayManager]   Rect[\(index)] (Window coords): \(convertedRect)")
-            print("[FloatingOverlayManager]   Expected if right=0, bottom=0: x=\(windowBounds.width - rect.width), y=\(windowBounds.height - rect.height)")
-        }
-        
-        // 比較新舊 rects，只有變化時才更新（避免瘋狂更新）
-        if convertedRects.count != lastRects.count {
-            // 數量不同，直接更新
-            window.clickableRects = convertedRects
-            window.hasClickableContent = !convertedRects.isEmpty
-            lastRects = convertedRects
-            print("[FloatingOverlayManager] ✅ Updated clickableRects: \(convertedRects.count) rects (count changed)")
-        } else {
-            // 數量相同，檢查每個 rect 是否有變化
-            var hasChanged = false
-            for (index, newRect) in convertedRects.enumerated() {
-                if index < lastRects.count {
-                    let oldRect = lastRects[index]
-                    // 允許 1 像素的誤差（避免浮點數精度問題）
-                    if abs(newRect.origin.x - oldRect.origin.x) > 1 ||
-                       abs(newRect.origin.y - oldRect.origin.y) > 1 ||
-                       abs(newRect.width - oldRect.width) > 1 ||
-                       abs(newRect.height - oldRect.height) > 1 {
-                        hasChanged = true
-                        break
-                    }
-                } else {
-                    hasChanged = true
-                    break
-                }
-            }
-            
-            if hasChanged {
-                window.clickableRects = convertedRects
-                window.hasClickableContent = !convertedRects.isEmpty
-                lastRects = convertedRects
-                print("[FloatingOverlayManager] ✅ Updated clickableRects: \(convertedRects.count) rects (position/size changed)")
-            } else {
-                // 沒有變化，跳過更新
-                print("[FloatingOverlayManager] ⏭️ Skipped update (no changes)")
-            }
-        }
-        
-        self.webView = webView
+        // 注意：在 floating mode 下，我們使用 resize event 來更新位置，忽略 JavaScript 的自動更新
+        // 因為 JavaScript 的 getBoundingClientRect() 對於 fixed 元素可能不準確
+        // 此函數僅用於記錄，實際位置更新由 updateClickableRectFromResizeEvent 處理
     }
 }
 
@@ -839,7 +770,8 @@ struct EmbedWebView: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = true
-        configuration.preferences.javaScriptEnabled = true
+        // 使用新的 API（iOS 14.0+），項目最低版本為 iOS 14.0
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = true
         configuration.allowsInlineMediaPlayback = true
         if #available(iOS 10.0, *) {
             configuration.mediaTypesRequiringUserActionForPlayback = []
@@ -1067,7 +999,8 @@ struct LightboxWebView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
-        configuration.preferences.javaScriptEnabled = true
+        // 使用新的 API（iOS 14.0+），項目最低版本為 iOS 14.0
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = true
         configuration.allowsInlineMediaPlayback = true
         if #available(iOS 10.0, *) {
             configuration.mediaTypesRequiringUserActionForPlayback = []
