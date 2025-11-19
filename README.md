@@ -92,4 +92,4 @@ MIT License - see LICENSE file for details
 
 ## Support
 
-For support, please contact: support@tagnology.co
+For support, please contact: wayne.zhang@tagnology.co

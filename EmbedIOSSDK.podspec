@@ -15,7 +15,7 @@ Pod::Spec.new do |spec|
   
 	spec.homepage     = "https://embed.tagnology.co"
 	spec.license      = { :type => "MIT", :file => "LICENSE" }
-	spec.author       = { "Tagnology" => "support@tagnology.co" }
+	spec.author       = { "Tagnology" => "wayne.zhang@tagnology.co" }
 	
 	spec.platform     = :ios, "14.0"
 	spec.swift_version = "5.0"
