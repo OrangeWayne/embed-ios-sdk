@@ -46,17 +46,11 @@ final class PassthroughWindow: UIWindow {
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         // 如果有可點擊內容，檢查是否在區域內
         if hasClickableContent && !clickableRects.isEmpty {
-            for (index, rect) in clickableRects.enumerated() {
+            for rect in clickableRects {
                 if rect.contains(point) {
-                    print("[PassthroughWindow] ✅ Point \(point) is in rect[\(index)]: \(rect)")
-                    let result = super.hitTest(point, with: event)
-                    print("[PassthroughWindow] hitTest result: \(String(describing: result))")
-                    return result
+                    return super.hitTest(point, with: event)
                 }
             }
-            print("[PassthroughWindow] ⬇️ Point \(point) not in any rect. Rects: \(clickableRects)")
-        } else {
-            print("[PassthroughWindow] ⬇️ No clickable content. hasClickableContent: \(hasClickableContent), rects count: \(clickableRects.count)")
         }
         
         // 不在可點擊區域內，穿透到下層
@@ -101,24 +95,16 @@ final class FloatingOverlayManager {
     }
     
     func updateClickableRectFromResizeEvent(property: [String: Any]?) {
-        print("[FloatingOverlayManager] 🔍 updateClickableRectFromResizeEvent called")
-        print("[FloatingOverlayManager]   property: \(String(describing: property))")
-        
         guard let window = window else {
-            print("[FloatingOverlayManager] ❌ window is nil")
             return
         }
         
         guard let property = property else {
-            print("[FloatingOverlayManager] ❌ property is nil")
             return
         }
         
         // 使用完整的 window bounds，不包含安全區域
         let windowBounds = window.bounds
-        print("[FloatingOverlayManager]   Window bounds (full, no safe area): \(windowBounds)")
-        print("[FloatingOverlayManager]     window.width: \(windowBounds.width)")
-        print("[FloatingOverlayManager]     window.height: \(windowBounds.height)")
         
         // 提取所有相關屬性
         let widthRaw = property["width"]
@@ -128,15 +114,6 @@ final class FloatingOverlayManager {
         let leftRaw = property["left"]
         let topRaw = property["top"]
         let position = property["position"] as? String
-        
-        print("[FloatingOverlayManager]   Raw values:")
-        print("[FloatingOverlayManager]     width: \(String(describing: widthRaw))")
-        print("[FloatingOverlayManager]     height: \(String(describing: heightRaw))")
-        print("[FloatingOverlayManager]     left: \(String(describing: leftRaw))")
-        print("[FloatingOverlayManager]     top: \(String(describing: topRaw))")
-        print("[FloatingOverlayManager]     right: \(String(describing: rightRaw))")
-        print("[FloatingOverlayManager]     bottom: \(String(describing: bottomRaw))")
-        print("[FloatingOverlayManager]     position: \(String(describing: position))")
         
         // 檢查是否為全螢幕狀態：width = 100dvw, height = 100dvh, top = 0, left = 0
         let isFullscreen = checkIfFullscreen(
@@ -150,8 +127,6 @@ final class FloatingOverlayManager {
         if isFullscreen {
             // 全螢幕狀態：將整個 window 設為可點擊區域
             let rect = windowBounds
-            print("[FloatingOverlayManager] 📐 Fullscreen mode detected:")
-            print("[FloatingOverlayManager]     Setting entire window as clickable: \(rect)")
             
             // 只有當 rect 真正改變時才更新
             let hasChanged: Bool
@@ -171,34 +146,18 @@ final class FloatingOverlayManager {
                 window.clickableRects = [rect]
                 window.hasClickableContent = true
                 lastRects = [rect]
-                print("[FloatingOverlayManager] ✅ Updated clickableRect to fullscreen")
-            } else {
-                print("[FloatingOverlayManager] ⏭️ Skipped update (no changes)")
             }
             return
         }
         
         // 非全螢幕狀態：正常計算位置
-        // 檢查是否為 fixed position（可選，因為有些 resize event 可能沒有 position）
-        if let position = position, position.lowercased() != "fixed" {
-            print("[FloatingOverlayManager] ⚠️ position is not fixed, but continuing anyway")
-        }
-        
         // 提取尺寸
         let width = extractPixelValue(from: widthRaw, windowBounds: windowBounds)
         let height = extractPixelValue(from: heightRaw, windowBounds: windowBounds)
         
-        print("[FloatingOverlayManager]   Extracted values:")
-        print("[FloatingOverlayManager]     width: \(width)")
-        print("[FloatingOverlayManager]     height: \(height)")
-        
         guard width > 0, height > 0 else {
-            print("[FloatingOverlayManager] ❌ Invalid width or height: width=\(width), height=\(height)")
             return
         }
-        
-        print("[FloatingOverlayManager]     window.width: \(windowBounds.width)")
-        print("[FloatingOverlayManager]     window.height: \(windowBounds.height)")
         
         var x: CGFloat = 0
         var y: CGFloat = 0
@@ -211,92 +170,66 @@ final class FloatingOverlayManager {
         var adjustedX: CGFloat = 0
         var adjustedWidth: CGFloat = width
         
-        print("[FloatingOverlayManager]   Calculating x coordinate:")
         if let right = rightRaw as? String, right != "auto" {
             let rightValue = extractPixelValue(from: right, windowBounds: windowBounds)
             x = windowBounds.width - width - rightValue
             // 使用 right 定位時：向右移動 12px，寬度減少 24px
             adjustedX = x + horizontalPadding
             adjustedWidth = max(0, width - horizontalPadding * 2)
-            print("[FloatingOverlayManager]     Using right: '\(right)' -> \(rightValue)")
-            print("[FloatingOverlayManager]     x = windowWidth(\(windowBounds.width)) - width(\(width)) - right(\(rightValue)) = \(x)")
-            print("[FloatingOverlayManager]     Adjusted: x = \(adjustedX), width = \(adjustedWidth) (reduced \(horizontalPadding * 2)px)")
         } else if let right = rightRaw as? NSNumber {
             let rightValue = CGFloat(truncating: right)
             x = windowBounds.width - width - rightValue
             // 使用 right 定位時：向右移動 12px，寬度減少 24px
             adjustedX = x + horizontalPadding
             adjustedWidth = max(0, width - horizontalPadding * 2)
-            print("[FloatingOverlayManager]     Using right (NSNumber): \(rightValue)")
-            print("[FloatingOverlayManager]     x = windowWidth(\(windowBounds.width)) - width(\(width)) - right(\(rightValue)) = \(x)")
-            print("[FloatingOverlayManager]     Adjusted: x = \(adjustedX), width = \(adjustedWidth) (reduced \(horizontalPadding * 2)px)")
         } else if let left = leftRaw as? String, left != "auto" {
             x = extractPixelValue(from: left, windowBounds: windowBounds)
             // 使用 left 定位時：向右移動 12px，寬度減少 24px
             adjustedX = x + horizontalPadding
             adjustedWidth = max(0, width - horizontalPadding * 2)
-            print("[FloatingOverlayManager]     Using left: '\(left)' -> \(x)")
-            print("[FloatingOverlayManager]     Adjusted: x = \(adjustedX), width = \(adjustedWidth) (reduced \(horizontalPadding * 2)px)")
         } else if let left = leftRaw as? NSNumber {
             x = CGFloat(truncating: left)
             // 使用 left 定位時：向右移動 12px，寬度減少 24px
             adjustedX = x + horizontalPadding
             adjustedWidth = max(0, width - horizontalPadding * 2)
-            print("[FloatingOverlayManager]     Using left (NSNumber): \(x)")
-            print("[FloatingOverlayManager]     Adjusted: x = \(adjustedX), width = \(adjustedWidth) (reduced \(horizontalPadding * 2)px)")
         } else {
             // 預設居中：左右各減少 12px
             x = (windowBounds.width - width) / 2
             adjustedX = x + horizontalPadding
             adjustedWidth = max(0, width - horizontalPadding * 2)
-            print("[FloatingOverlayManager]     Using center: x = (\(windowBounds.width) - \(width)) / 2 = \(x)")
-            print("[FloatingOverlayManager]     Adjusted: x = \(adjustedX), width = \(adjustedWidth) (reduced \(horizontalPadding * 2)px)")
         }
         
         // 計算 y 座標和調整高度
         var adjustedY: CGFloat = 0
         var adjustedHeight: CGFloat = height
         
-        print("[FloatingOverlayManager]   Calculating y coordinate:")
         if let bottom = bottomRaw as? String, bottom != "auto" {
             let bottomValue = extractPixelValue(from: bottom, windowBounds: windowBounds)
             y = windowBounds.height - height - bottomValue
             // 使用 bottom 定位時：向上移動 12px，高度增加 24px
             adjustedY = max(0, y - verticalPadding)
             adjustedHeight = height + verticalPadding * 2
-            print("[FloatingOverlayManager]     Using bottom: '\(bottom)' -> \(bottomValue)")
-            print("[FloatingOverlayManager]     y = windowHeight(\(windowBounds.height)) - height(\(height)) - bottom(\(bottomValue)) = \(y)")
-            print("[FloatingOverlayManager]     Adjusted: y = \(adjustedY), height = \(adjustedHeight) (added \(verticalPadding * 2)px)")
         } else if let bottom = bottomRaw as? NSNumber {
             let bottomValue = CGFloat(truncating: bottom)
             y = windowBounds.height - height - bottomValue
             // 使用 bottom 定位時：向上移動 12px，高度增加 24px
             adjustedY = max(0, y - verticalPadding)
             adjustedHeight = height + verticalPadding * 2
-            print("[FloatingOverlayManager]     Using bottom (NSNumber): \(bottomValue)")
-            print("[FloatingOverlayManager]     y = windowHeight(\(windowBounds.height)) - height(\(height)) - bottom(\(bottomValue)) = \(y)")
-            print("[FloatingOverlayManager]     Adjusted: y = \(adjustedY), height = \(adjustedHeight) (added \(verticalPadding * 2)px)")
         } else if let top = topRaw as? String, top != "auto" {
             y = extractPixelValue(from: top, windowBounds: windowBounds)
             // 使用 top 定位時：向上移動 12px，高度增加 24px
             adjustedY = max(0, y - verticalPadding)
             adjustedHeight = height + verticalPadding * 2
-            print("[FloatingOverlayManager]     Using top: '\(top)' -> \(y)")
-            print("[FloatingOverlayManager]     Adjusted: y = \(adjustedY), height = \(adjustedHeight) (added \(verticalPadding * 2)px)")
         } else if let top = topRaw as? NSNumber {
             y = CGFloat(truncating: top)
             // 使用 top 定位時：向上移動 12px，高度增加 24px
             adjustedY = max(0, y - verticalPadding)
             adjustedHeight = height + verticalPadding * 2
-            print("[FloatingOverlayManager]     Using top (NSNumber): \(y)")
-            print("[FloatingOverlayManager]     Adjusted: y = \(adjustedY), height = \(adjustedHeight) (added \(verticalPadding * 2)px)")
         } else {
             // 預設居中：上下各增加 12px
             y = (windowBounds.height - height) / 2
             adjustedY = max(0, y - verticalPadding)
             adjustedHeight = height + verticalPadding * 2
-            print("[FloatingOverlayManager]     Using center: y = (\(windowBounds.height) - \(height)) / 2 = \(y)")
-            print("[FloatingOverlayManager]     Adjusted: y = \(adjustedY), height = \(adjustedHeight) (added \(verticalPadding * 2)px)")
         }
         
         // 確保不會超出 window 邊界
@@ -312,18 +245,10 @@ final class FloatingOverlayManager {
         
         let rect = CGRect(x: adjustedX, y: adjustedY, width: adjustedWidth, height: adjustedHeight)
         
-        print("[FloatingOverlayManager] 📐 Final calculated rect:")
-        print("[FloatingOverlayManager]     x: \(x)")
-        print("[FloatingOverlayManager]     y: \(y)")
-        print("[FloatingOverlayManager]     width: \(width)")
-        print("[FloatingOverlayManager]     height: \(height)")
-        print("[FloatingOverlayManager]     rect: \(rect)")
-        
         // 只有當 rect 真正改變時才更新
         let hasChanged: Bool
         if lastRects.count != 1 {
             hasChanged = true
-            print("[FloatingOverlayManager]   Change detected: lastRects count (\(lastRects.count)) != 1")
         } else if let lastRect = lastRects.first {
             // 允許 1 像素的誤差（避免浮點數精度問題）
             let dx = abs(lastRect.origin.x - rect.origin.x)
@@ -331,23 +256,14 @@ final class FloatingOverlayManager {
             let dw = abs(lastRect.width - rect.width)
             let dh = abs(lastRect.height - rect.height)
             hasChanged = dx > 1 || dy > 1 || dw > 1 || dh > 1
-            print("[FloatingOverlayManager]   Comparing with last rect:")
-            print("[FloatingOverlayManager]     lastRect: \(lastRect)")
-            print("[FloatingOverlayManager]     newRect: \(rect)")
-            print("[FloatingOverlayManager]     differences: dx=\(dx), dy=\(dy), dw=\(dw), dh=\(dh)")
-            print("[FloatingOverlayManager]     hasChanged: \(hasChanged)")
         } else {
             hasChanged = true
-            print("[FloatingOverlayManager]   Change detected: lastRects.first is nil")
         }
         
         if hasChanged {
             window.clickableRects = [rect]
             window.hasClickableContent = true
             lastRects = [rect]
-            print("[FloatingOverlayManager] ✅ Updated clickableRect from resize event")
-        } else {
-            print("[FloatingOverlayManager] ⏭️ Skipped update (no changes)")
         }
     }
     
@@ -365,30 +281,16 @@ final class FloatingOverlayManager {
         let isLeftZero = leftStr == "0" || leftStr == "0px" || (left as? NSNumber)?.doubleValue == 0
         let isTopZero = topStr == "0" || topStr == "0px" || (top as? NSNumber)?.doubleValue == 0
         
-        let result = isFullscreenWidth && isFullscreenHeight && isLeftZero && isTopZero
-        
-        print("[FloatingOverlayManager]   checkIfFullscreen:")
-        print("[FloatingOverlayManager]     width: '\(widthStr)' -> isFullscreenWidth: \(isFullscreenWidth)")
-        print("[FloatingOverlayManager]     height: '\(heightStr)' -> isFullscreenHeight: \(isFullscreenHeight)")
-        print("[FloatingOverlayManager]     left: '\(leftStr)' -> isLeftZero: \(isLeftZero)")
-        print("[FloatingOverlayManager]     top: '\(topStr)' -> isTopZero: \(isTopZero)")
-        print("[FloatingOverlayManager]     result: \(result)")
-        
-        return result
+        return isFullscreenWidth && isFullscreenHeight && isLeftZero && isTopZero
     }
     
     private func extractPixelValue(from value: Any?, windowBounds: CGRect? = nil) -> CGFloat {
-        print("[FloatingOverlayManager]   extractPixelValue called with: \(String(describing: value)) (type: \(type(of: value ?? "nil")))")
-        
         guard let value = value else {
-            print("[FloatingOverlayManager]     -> 0 (nil)")
             return 0
         }
         
         if let number = value as? NSNumber {
-            let result = CGFloat(truncating: number)
-            print("[FloatingOverlayManager]     -> \(result) (NSNumber)")
-            return result
+            return CGFloat(truncating: number)
         }
         
         if let string = value as? String {
@@ -400,9 +302,7 @@ final class FloatingOverlayManager {
                     .replacingOccurrences(of: "vw", with: "")
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 if let percent = Double(cleaned), let bounds = windowBounds {
-                    let result = bounds.width * CGFloat(percent) / 100.0
-                    print("[FloatingOverlayManager]     -> \(result) (vw: \(percent)%)")
-                    return result
+                    return bounds.width * CGFloat(percent) / 100.0
                 }
             }
             
@@ -411,39 +311,23 @@ final class FloatingOverlayManager {
                     .replacingOccurrences(of: "vh", with: "")
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 if let percent = Double(cleaned), let bounds = windowBounds {
-                    let result = bounds.height * CGFloat(percent) / 100.0
-                    print("[FloatingOverlayManager]     -> \(result) (vh: \(percent)%)")
-                    return result
+                    return bounds.height * CGFloat(percent) / 100.0
                 }
             }
             
             // 移除 "px" 後綴並轉換為數字
             let cleaned = string.replacingOccurrences(of: "px", with: "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            print("[FloatingOverlayManager]     cleaned string: '\(cleaned)'")
             if let doubleValue = Double(cleaned) {
-                let result = CGFloat(doubleValue)
-                print("[FloatingOverlayManager]     -> \(result) (String parsed)")
-                return result
-            } else {
-                print("[FloatingOverlayManager]     -> 0 (String parse failed)")
+                return CGFloat(doubleValue)
             }
         }
         
-        print("[FloatingOverlayManager]     -> 0 (unknown type)")
         return 0
     }
     
     func updateClickableRects(_ rects: [CGRect], webView: WKWebView?) {
         // 在 floating mode 下，我們使用 resize event 來更新位置，忽略 JavaScript 的自動更新
-        // 因為 JavaScript 的 getBoundingClientRect() 對於 fixed 元素可能不準確
-        print("[FloatingOverlayManager] 📊 Received \(rects.count) rects from JavaScript")
-        print("[FloatingOverlayManager]   ⚠️ Ignoring JavaScript update (using resize event instead)")
-        print("[FloatingOverlayManager]   If you see this, JavaScript updateClickableRegions is still running")
-        for (index, rect) in rects.enumerated() {
-            print("[FloatingOverlayManager]   Rect[\(index)] (WebView coords, ignored): \(rect)")
-        }
-        // 注意：在 floating mode 下，我們使用 resize event 來更新位置，忽略 JavaScript 的自動更新
         // 因為 JavaScript 的 getBoundingClientRect() 對於 fixed 元素可能不準確
         // 此函數僅用於記錄，實際位置更新由 updateClickableRectFromResizeEvent 處理
     }
@@ -564,7 +448,6 @@ public struct EmbedView: View {
     private func handleEmbedEvent(_ event: EmbedWebView.EmbedEvent) {
         switch event.type {
         case "resize":
-            print("[EmbedView] resize event:", event.payload)
             handleResizeEventPayload(event.payload)
         case "click":
             guard let item = event.payload["data"] as? [String: Any] else {
@@ -572,7 +455,6 @@ public struct EmbedView: View {
             }
             let disabled = (item["disabledLightBox"] as? Bool) ?? false
             if disabled {
-                print("[EmbedView] click event disabledLightBox true, skip")
                 return
             }
             let messagePayload: [String: Any] = [
@@ -609,8 +491,6 @@ public struct EmbedView: View {
                 print("[EmbedView] toggleLB missing or invalid open flag:", String(describing: openValue))
                 return
             }
-
-            print("[EmbedView] toggleLB open:", open)
             handleLightboxToggle(open)
             if !open {
                 pendingLightboxMessageJSON = nil
@@ -635,21 +515,13 @@ public struct EmbedView: View {
         let shouldDefer = shouldDeferHeightSync(rawHeightFromProperty, property: property)
         let resolvedHeight = extractNumericHeight(from: payload, property: property)
 
-        // 如果是 floating mode，從 resize event 的 property 中更新可點擊區域
-        print("[EmbedView] handleResizeEventPayload:")
-        print("[EmbedView]   hasInstalledFloatingOverlay: \(hasInstalledFloatingOverlay)")
-        print("[EmbedView]   property: \(String(describing: property))")
-        
         if hasInstalledFloatingOverlay {
             if let property = property {
-                print("[EmbedView]   Calling updateClickableRectFromResizeEvent")
                 FloatingOverlayManager.shared.updateClickableRectFromResizeEvent(property: property)
             } else {
                 print("[EmbedView]   ⚠️ property is nil, skipping updateClickableRectFromResizeEvent")
             }
-        } else {
-            print("[EmbedView]   ⚠️ hasInstalledFloatingOverlay is false, skipping updateClickableRectFromResizeEvent")
-        }
+        } 
 
         // 如果 widget 指定 position: fixed，切換為 fullscreen fixed（避免被外層壓扁）
         if let position = property?["position"] as? String, position.lowercased() == "fixed" {
