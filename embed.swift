@@ -365,6 +365,7 @@ public struct EmbedFolderInfo: Identifiable, Codable, Hashable {
 // MARK: - EmbedView (SwiftUI)
 public struct EmbedView: View {
     private let folderInfo: EmbedFolderInfo
+	private let pageUrl: String
 
     @State private var contentHeight: CGFloat = 0
     @State private var isLightboxPresented = false
@@ -373,10 +374,22 @@ public struct EmbedView: View {
     @State private var isFullscreenFixed = false
     @State private var hasInstalledFloatingOverlay = false
 
-    private let lightboxURL = EmbedHTMLBuilder.lightBoxURL
+    private var lightboxURL: URL {
+        EmbedHTMLBuilder.lightBoxURL(pageUrl: pageUrl)
+    }
 
-    public init(folderInfo: EmbedFolderInfo) {
+    /**
+     * @function init
+     * @description Initializes EmbedView with folder information and page URL.
+     *
+     * @param {EmbedFolderInfo} folderInfo - The folder information for the embed widget.
+     * @param {String} pageUrl - The page URL where the widget is displayed.
+     *
+     * @returns {EmbedView} A new EmbedView instance.
+     */
+    public init(folderInfo: EmbedFolderInfo, pageUrl: String) {
         self.folderInfo = folderInfo
+        self.pageUrl = pageUrl
     }
 
     public var body: some View {
@@ -390,6 +403,7 @@ public struct EmbedView: View {
                 ZStack {
                     EmbedWebView(
                         folderId: folderInfo.folderId,
+                        pageUrl: pageUrl,
                         contentHeight: $contentHeight,
                         onEvent: handleEmbedEvent,
                         isFloatingMode: false
@@ -424,6 +438,7 @@ public struct EmbedView: View {
             // 右下角定位的浮動媒體 iframe（實際固定由內部 CSS: position: fixed; bottom/right）
             EmbedWebView(
                 folderId: folderInfo.folderId,
+                pageUrl: pageUrl,
                 contentHeight: $contentHeight,
                 onEvent: handleEmbedEvent,
                 isFloatingMode: true
@@ -614,6 +629,7 @@ public struct EmbedView: View {
 // MARK: - EmbedWebView (UIViewRepresentable)
 struct EmbedWebView: UIViewRepresentable {
     let folderId: String
+    let pageUrl: String
     @Binding var contentHeight: CGFloat
     let onEvent: (EmbedEvent) -> Void
     let isFloatingMode: Bool
@@ -764,7 +780,7 @@ struct EmbedWebView: UIViewRepresentable {
     }
 
     private func loadWidget(into webView: WKWebView) {
-        let htmlString = EmbedHTMLBuilder.buildHTML(folderId: folderId)
+        let htmlString = EmbedHTMLBuilder.buildHTML(folderId: folderId, pageUrl: pageUrl)
         webView.loadHTMLString(htmlString, baseURL: EmbedHTMLBuilder.assetBaseURL)
     }
 
@@ -977,10 +993,31 @@ struct LightboxWebView: UIViewRepresentable {
 // MARK: - EmbedHTMLBuilder (HTML + Safari 14 workaround)
 enum EmbedHTMLBuilder {
     static let assetBaseURL = URL(string: "https://embed.tagnology.co")!
-    static let lightBoxURL = URL(string: "https://embed.tagnology.co/lightBox?page=swiftui")!
+    
+    /**
+     * @function lightBoxURL
+     * @description Generates the lightbox URL with the specified page URL.
+     *
+     * @param {String} pageUrl - The page URL to include in the lightbox query parameter.
+     *
+     * @returns {URL} The lightbox URL with the page parameter.
+     */
+    static func lightBoxURL(pageUrl: String) -> URL {
+        return URL(string: "https://embed.tagnology.co/lightBox?page=\(pageUrl)")!
+    }
+    
     static let origin = "https://embed.tagnology.co"
 
-    static func buildHTML(folderId: String) -> String {
+    /**
+     * @function buildHTML
+     * @description Builds the HTML string for embedding the widget.
+     *
+     * @param {String} folderId - The folder ID for the embed widget.
+     * @param {String} pageUrl - The page URL where the widget is displayed.
+     *
+     * @returns {String} The HTML string containing the embed iframe.
+     */
+    static func buildHTML(folderId: String, pageUrl: String) -> String {
         // 這裡注入 CSS 的重點是：解 Safari 14 iframe + position:fixed 的 bug
         // 並仍保留 JS 來解析 widget 傳來的 property，並把 property 套到 iframe.style
         return """
@@ -1019,7 +1056,7 @@ enum EmbedHTMLBuilder {
             </style>
         </head>
         <body>
-            <iframe id="embed-frame" src="https://embed.tagnology.co/display?folderId=\(folderId)&page=swiftui" scrolling="no" frameborder="0" allow="fullscreen; autoplay; picture-in-picture" playsinline></iframe>
+            <iframe id="embed-frame" src="https://embed.tagnology.co/display?folderId=\(folderId)&page=\(pageUrl)" scrolling="no" frameborder="0" allow="fullscreen; autoplay; picture-in-picture" playsinline></iframe>
             <script>
             const frame = document.getElementById('embed-frame');
 
