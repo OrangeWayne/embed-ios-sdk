@@ -113,7 +113,6 @@ final class FloatingOverlayManager {
         let bottomRaw = property["bottom"]
         let leftRaw = property["left"]
         let topRaw = property["top"]
-        let position = property["position"] as? String
         
         // 檢查是否為全螢幕狀態：width = 100dvw, height = 100dvh, top = 0, left = 0
         let isFullscreen = checkIfFullscreen(
@@ -333,6 +332,183 @@ final class FloatingOverlayManager {
     }
 }
 
+// MARK: - Position Enum
+/**
+ * @enum EmbedPosition
+ * @description Defines the position where the embed widget should be displayed on the page.
+ */
+public enum EmbedPosition: String, Codable {
+    case BELOW_BUY_BUTTON = "BELOW_BUY_BUTTON"
+    case BELOW_MAIN_PRODUCT_INFO = "BELOW_MAIN_PRODUCT_INFO"
+    case ABOVE_RECOMMENDATION = "ABOVE_RECOMMENDATION"
+    case ABOVE_FILTER = "ABOVE_FILTER"
+}
+
+// MARK: - SDK Namespace
+/**
+ * @enum EmbedIOSSDK
+ * @description Main namespace for EmbedIOSSDK, providing convenient access to SDK types and constants.
+ */
+public enum EmbedIOSSDK {
+    /// Position enum for embed widget placement
+    public typealias Position = EmbedPosition
+    
+    /// Convenience access to position values
+    public static let BELOW_BUY_BUTTON = EmbedPosition.BELOW_BUY_BUTTON
+    public static let BELOW_MAIN_PRODUCT_INFO = EmbedPosition.BELOW_MAIN_PRODUCT_INFO
+    public static let ABOVE_RECOMMENDATION = EmbedPosition.ABOVE_RECOMMENDATION
+    public static let ABOVE_FILTER = EmbedPosition.ABOVE_FILTER
+}
+
+// MARK: - API
+/**
+ * @class EmbedAPI
+ * @description Handles API calls to fetch embed widget information from the server.
+ */
+public enum EmbedAPI {
+    /// 預設平台識別碼
+    public static let defaultPlatform = "91APP"
+    
+    /**
+     * @function extractProductIdFromPageUrl
+     * @description Extracts product ID from page URL based on the URL path pattern.
+     *              Matches the logic from JavaScript getProductId() function.
+     *
+     * @param {String} pageUrl - The page URL to extract product ID from.
+     *
+     * @returns {String?} The extracted product ID, or nil if not found.
+     */
+    public static func extractProductIdFromPageUrl(_ pageUrl: String) -> String? {
+        guard let url = URL(string: pageUrl) else {
+            return nil
+        }
+        
+        let pathname = url.path.lowercased()
+        let pathComponents = pathname.components(separatedBy: "/").filter { !$0.isEmpty }
+        
+        if pathname.contains("/salepage/") {
+            // 對於 SalePage，返回最後一個路徑組件
+            // 注意：在 Swift 中無法從 DOM 獲取，所以直接使用路徑的最後部分
+            return pathComponents.last
+        } else if pathname.contains("/salepagecategory/") {
+            // 對於 SalePageCategory，返回 category_${最後一個部分}
+            if let lastComponent = pathComponents.last {
+                return "category_\(lastComponent)"
+            }
+        } else if pathname.contains("/detail/") {
+            // 對於 Detail，返回 detail_${最後一個部分}
+            if let lastComponent = pathComponents.last {
+                return "detail_\(lastComponent)"
+            }
+        }
+        
+        return nil
+    }
+    /**
+     * @struct PageInfoResponse
+     * @description Response structure from the getPageInfo API endpoint.
+     */
+    public struct PageInfoResponse: Codable {
+        public let message: String
+        public let pageInfo: [EmbedFolderInfo]
+        
+        public init(message: String, pageInfo: [EmbedFolderInfo]) {
+            self.message = message
+            self.pageInfo = pageInfo
+        }
+    }
+    
+    /**
+     * @function fetchPageInfo
+     * @description Fetches page information including embed widgets from the server.
+     *
+     * @param {String} productId - The product ID to fetch information for.
+     * @param {String} platform - The platform identifier (e.g., "91APP").
+     * @param {String} pageUrl - The page URL where the widget is displayed.
+     *
+     * @returns {PageInfoResponse} The response containing page information and embed widgets.
+     * @throws {URLError} If the URL is invalid or the request fails.
+     */
+    public static func fetchPageInfo(productId: String, platform: String, pageUrl: String) async throws -> PageInfoResponse {
+        guard let url = URL(string: "https://embed.tagnology.co/api/product/getPageInfo") else {
+            throw URLError(.badURL)
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let body: [String: Any] = [
+            "productId": productId,
+            "platform": platform,
+            "page": pageUrl
+        ]
+        request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [])
+        
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw URLError(.badServerResponse)
+        }
+        let decoded = try JSONDecoder().decode(PageInfoResponse.self, from: data)
+        return decoded
+    }
+    
+    /**
+     * @function fetchPageInfoForPosition
+     * @description Fetches page information and filters widgets by the specified position.
+     *
+     * @param {String} pageUrl - The page URL where the widget is displayed.
+     * @param {EmbedPosition} position - The position where the widget should be displayed.
+     * @param {String} productId - Optional product ID. If not provided, will be extracted from pageUrl if possible.
+     * @param {String} platform - Optional platform identifier. Defaults to "91APP" if not provided.
+     *
+     * @returns {[EmbedFolderInfo]} Array of embed folder information matching the specified position, or empty array if none found.
+     * @throws {URLError} If the URL is invalid or the request fails.
+     */
+    public static func fetchPageInfoForPosition(
+        pageUrl: String,
+        position: EmbedPosition,
+        productId: String? = nil,
+        platform: String = EmbedAPI.defaultPlatform
+    ) async throws -> [EmbedFolderInfo] {
+        // 嘗試從 pageUrl 提取 productId（如果未提供）
+        let finalProductId: String
+        if let productId = productId {
+            finalProductId = productId
+        } else {
+            // 使用 extractProductIdFromPageUrl 函數提取 productId
+            finalProductId = EmbedAPI.extractProductIdFromPageUrl(pageUrl) ?? ""
+        }
+        
+        let response = try await fetchPageInfo(
+            productId: finalProductId,
+            platform: platform,
+            pageUrl: pageUrl
+        )
+        
+        // 根據 position 過濾 widgets
+        let positionString = position.rawValue
+        let filteredWidgets = response.pageInfo.filter { folderInfo in
+            // 檢查 embedLocation 是否匹配 position
+            if let embedLocation = folderInfo.embedLocation {
+                let embedLocationUpper = embedLocation.uppercased().trimmingCharacters(in: .whitespacesAndNewlines)
+                let positionStringTrimmed = positionString.trimmingCharacters(in: .whitespacesAndNewlines)
+                return embedLocationUpper == positionStringTrimmed
+            }
+            return false
+        }
+        
+        // 對過濾後的 widgets 進行排序：按照 timestamp 降序（較新的先顯示）
+        // 如果沒有 timestamp，則保持原順序（放在最後）
+        let sortedWidgets = filteredWidgets.sorted { folderInfo1, folderInfo2 in
+            let timestamp1 = folderInfo1.timestamp ?? 0
+            let timestamp2 = folderInfo2.timestamp ?? 0
+            // 降序排序：timestamp 較大的（較新的）先顯示
+            return timestamp1 > timestamp2
+        }
+        
+        return sortedWidgets
+    }
+}
+
 // MARK: - Models
 public struct EmbedFolderInfo: Identifiable, Codable, Hashable {
     public let folderId: String
@@ -359,6 +535,197 @@ public struct EmbedFolderInfo: Identifiable, Codable, Hashable {
         self.timestamp = timestamp
         self.folderName = folderName
         self.layout = layout
+    }
+}
+
+// MARK: - EmbedWidgetView (SwiftUI - Auto-loading by position)
+/**
+ * @struct EmbedWidgetView
+ * @description A SwiftUI view that automatically loads and displays embed widgets based on page URL and position.
+ *              This view handles API calls internally and only displays widgets when data is available.
+ */
+public struct EmbedWidgetView: View {
+    private let pageUrl: String
+    private let position: EmbedPosition
+    private let productId: String?
+    private let platform: String
+    
+    @State private var folderInfos: [EmbedFolderInfo] = []
+    @State private var isLoading: Bool = false
+    @State private var errorMessage: String?
+    @State private var hasStartedLoading: Bool = false
+    
+    /**
+     * @function init
+     * @description Initializes EmbedWidgetView with page URL and position.
+     *              Product ID will be automatically extracted from pageUrl, and platform defaults to "91APP".
+     *
+     * @param {String} pageUrl - The page URL where the widget is displayed.
+     * @param {EmbedPosition} position - The position where the widget should be displayed.
+     *
+     * @returns {EmbedWidgetView} A new EmbedWidgetView instance.
+     */
+    public init(
+        pageUrl: String,
+        position: EmbedPosition
+    ) {
+        self.pageUrl = pageUrl
+        self.position = position
+        // 自動從 pageUrl 提取 productId（使用與 JavaScript getProductId() 相同的邏輯）
+        self.productId = EmbedAPI.extractProductIdFromPageUrl(pageUrl)
+        // 使用預設平台
+        self.platform = EmbedAPI.defaultPlatform
+        
+        // 在 init 完成後立即開始載入 widgets（不等待 onAppear）
+        let productIdToLoad = self.productId
+        let platformToLoad = self.platform
+        let pageUrlToLoad = self.pageUrl
+        let positionToLoad = self.position
+        
+        // 同時進行 log 和載入
+        Task {
+            // 先進行 log
+            await EmbedWidgetView.fetchAndLogPageInfo(
+                productId: productIdToLoad,
+                platform: platformToLoad,
+                pageUrl: pageUrlToLoad,
+                position: positionToLoad
+            )
+        }
+        
+        // 立即開始載入 widgets（使用延遲執行來避免在 init 中直接修改 @State）
+        // 注意：在 init 中無法直接修改 @State，所以我們在 body 第一次計算時觸發載入
+    }
+    
+    /**
+     * @function fetchAndLogPageInfo
+     * @description 呼叫 getPageInfo API 並將相關資訊 log 出來，並標註哪些 widget 會根據 embedLocation 被顯示
+     *
+     * @param {String?} productId - 產品 ID
+     * @param {String} platform - 平台識別碼
+     * @param {String} pageUrl - 頁面 URL
+     * @param {EmbedPosition} position - 要顯示的 widget 位置
+     */
+    private static func fetchAndLogPageInfo(
+        productId: String?,
+        platform: String,
+        pageUrl: String,
+        position: EmbedPosition
+    ) async {
+        guard let productId = productId else {
+            return
+        }
+        
+        do {
+            let response = try await EmbedAPI.fetchPageInfo(
+                productId: productId,
+                platform: platform,
+                pageUrl: pageUrl
+            )
+            
+            // 根據 position 過濾 widgets
+            let positionString = position.rawValue
+            let filteredWidgets = response.pageInfo.filter { folderInfo in
+                if let embedLocation = folderInfo.embedLocation {
+                    let embedLocationUpper = embedLocation.uppercased().trimmingCharacters(in: .whitespacesAndNewlines)
+                    let positionStringTrimmed = positionString.trimmingCharacters(in: .whitespacesAndNewlines)
+                    return embedLocationUpper == positionStringTrimmed
+                }
+                return false
+            }
+            
+            // 只顯示需要顯示的 widgets 資訊
+            if !filteredWidgets.isEmpty {
+                for folderInfo in filteredWidgets {
+                    print("position: \(positionString)")
+                    print("folderId: \(folderInfo.folderId)")
+                    print("folderName: \(folderInfo.folderName ?? "nil")")
+                    print("layout: \(folderInfo.layout ?? "nil")")
+                    print("---")
+                }
+            }
+        } catch {
+            // 錯誤時不輸出 log
+        }
+    }
+    
+    public var body: some View {
+        // 在 body 第一次計算時就開始載入（不等待 onAppear，確保即使不在可見區域也會載入）
+        if !hasStartedLoading {
+            DispatchQueue.main.async {
+                if !self.hasStartedLoading {
+                    self.hasStartedLoading = true
+                    Task {
+                        await self.loadWidgets()
+                    }
+                }
+            }
+        }
+        
+        return Group {
+            if isLoading {
+                // 載入中時不顯示任何內容（或可選擇顯示載入指示器）
+                EmptyView()
+            } else if errorMessage != nil {
+                // 錯誤時不顯示任何內容（或可選擇顯示錯誤訊息）
+                EmptyView()
+            } else if folderInfos.isEmpty {
+                // 沒有資料時不顯示
+                EmptyView()
+            } else {
+                // 有資料時顯示所有匹配的 widgets（依序垂直排列）
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(folderInfos, id: \.folderId) { folderInfo in
+                        EmbedView(folderInfo: folderInfo, pageUrl: pageUrl)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                .frame(maxWidth: .infinity)
+            }
+        }
+    }
+    
+    /**
+     * @function loadWidgets
+     * @description Loads widgets from the API based on the specified position.
+     */
+    private func loadWidgets() async {
+        // 使用 MainActor 確保狀態檢查和設置是原子操作
+        let shouldLoad = await MainActor.run {
+            if self.isLoading {
+                return false
+            }
+            if self.hasStartedLoading && !self.folderInfos.isEmpty {
+                return false
+            }
+            // 設置載入狀態
+            self.isLoading = true
+            self.errorMessage = nil
+            return true
+        }
+        
+        guard shouldLoad else {
+            return
+        }
+        
+        do {
+            let widgets = try await EmbedAPI.fetchPageInfoForPosition(
+                pageUrl: pageUrl,
+                position: position,
+                productId: productId,
+                platform: platform
+            )
+            
+            await MainActor.run {
+                self.folderInfos = widgets
+                self.isLoading = false
+            }
+        } catch {
+            await MainActor.run {
+                self.errorMessage = error.localizedDescription
+                self.isLoading = false
+            }
+        }
     }
 }
 
@@ -397,8 +764,12 @@ public struct EmbedView: View {
             if (folderInfo.layout?.lowercased() == "floatingmedia") {
                 Color.clear
                     .frame(height: 0.1)
-                    .onAppear { installFloatingOverlay() }
-                    .onDisappear { uninstallFloatingOverlay() }
+                    .onAppear { 
+                        installFloatingOverlay() 
+                    }
+                    .onDisappear { 
+                        uninstallFloatingOverlay() 
+                    }
             } else {
                 ZStack {
                     EmbedWebView(
@@ -479,7 +850,6 @@ public struct EmbedView: View {
             guard JSONSerialization.isValidJSONObject(messagePayload),
                   let jsonData = try? JSONSerialization.data(withJSONObject: messagePayload),
                   let jsonString = String(data: jsonData, encoding: .utf8) else {
-                print("[EmbedView] click event failed to encode payload")
                 return
             }
             pendingLightboxMessageJSON = jsonString
@@ -503,7 +873,6 @@ public struct EmbedView: View {
             }()
 
             guard let open = shouldOpen else {
-                print("[EmbedView] toggleLB missing or invalid open flag:", String(describing: openValue))
                 return
             }
             handleLightboxToggle(open)
@@ -531,11 +900,13 @@ public struct EmbedView: View {
         let resolvedHeight = extractNumericHeight(from: payload, property: property)
 
         if hasInstalledFloatingOverlay {
+            // 在 floating overlay 模式下，使用 property 來更新可點擊區域
+            // 如果 property 為 nil，這是正常的（例如某些 resize event 可能不包含 property）
+            // 我們只在有 property 時才更新，避免不必要的警告
             if let property = property {
                 FloatingOverlayManager.shared.updateClickableRectFromResizeEvent(property: property)
-            } else {
-                print("[EmbedView]   ⚠️ property is nil, skipping updateClickableRectFromResizeEvent")
             }
+            // 注意：property 為 nil 時不更新是正常的，不需要警告
         } 
 
         // 如果 widget 指定 position: fixed，切換為 fullscreen fixed（避免被外層壓扁）
@@ -658,8 +1029,7 @@ struct EmbedWebView: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = true
-        // 使用新的 API（iOS 14.0+），項目最低版本為 iOS 14.0
-        configuration.defaultWebpagePreferences.allowsContentJavaScript = true
+        configuration.preferences.javaScriptEnabled = true
         configuration.allowsInlineMediaPlayback = true
         if #available(iOS 10.0, *) {
             configuration.mediaTypesRequiringUserActionForPlayback = []
@@ -800,7 +1170,9 @@ struct EmbedWebView: UIViewRepresentable {
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
             switch message.name {
             case EmbedBridge.resizeHandlerName:
-                guard var payload = message.body as? [String: Any] else { return }
+                guard var payload = message.body as? [String: Any] else { 
+                    return 
+                }
                 let reportedHeight: CGFloat? = {
                     if let numericValue = payload["height"] as? NSNumber {
                         return CGFloat(truncating: numericValue)
@@ -808,12 +1180,13 @@ struct EmbedWebView: UIViewRepresentable {
                     return nil
                 }()
                 DispatchQueue.main.async { [weak self] in
+                    guard let self = self else { return }
                     if let height = reportedHeight {
-                        self?.parent.contentHeight = height
+                        self.parent.contentHeight = height
                     }
                     payload[EmbedBridge.eventTypeKey] = payload[EmbedBridge.eventTypeKey] ?? "resize"
                     if let embedEvent = EmbedWebView.makeEvent(from: payload) {
-                        self?.onEvent(embedEvent)
+                        self.onEvent(embedEvent)
                     }
                 }
             case EmbedBridge.eventHandlerName:
@@ -863,10 +1236,12 @@ struct EmbedWebView: UIViewRepresentable {
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             // 初次載入時回報高度
             webView.evaluateJavaScript("document.body.scrollHeight") { [weak self] result, _ in
-                guard let number = result as? NSNumber else { return }
-                let height = CGFloat(truncating: number)
-                DispatchQueue.main.async {
-                    self?.parent.contentHeight = max(height, self?.parent.contentHeight ?? 0)
+                guard let self = self else { return }
+                if let number = result as? NSNumber {
+                    let height = CGFloat(truncating: number)
+                    DispatchQueue.main.async {
+                        self.parent.contentHeight = max(height, self.parent.contentHeight)
+                    }
                 }
             }
             
@@ -887,8 +1262,7 @@ struct LightboxWebView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
-        // 使用新的 API（iOS 14.0+），項目最低版本為 iOS 14.0
-        configuration.defaultWebpagePreferences.allowsContentJavaScript = true
+        configuration.preferences.javaScriptEnabled = true
         configuration.allowsInlineMediaPlayback = true
         if #available(iOS 10.0, *) {
             configuration.mediaTypesRequiringUserActionForPlayback = []
