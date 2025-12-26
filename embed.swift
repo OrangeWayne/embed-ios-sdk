@@ -3,21 +3,11 @@ import SwiftUI
 import WebKit
 
 // MARK: - View Modifiers
-private struct InteractiveDismissModifierCompat: ViewModifier {
-    let isDisabled: Bool
-    
-    func body(content: Content) -> some View {
-        if #available(iOS 15.0, *) {
-            content.interactiveDismissDisabled(isDisabled)
-        } else {
-            content
-        }
-    }
-}
-
+@available(iOS 16.0, *)
 extension View {
     fileprivate func interactiveDismissDisabledCompat(_ disabled: Bool) -> some View {
-        self.modifier(InteractiveDismissModifierCompat(isDisabled: disabled))
+        // iOS 16+ 直接支援 interactiveDismissDisabled (iOS 15.0+)
+        self.interactiveDismissDisabled(disabled)
     }
 }
 
@@ -27,309 +17,6 @@ enum EmbedBridge {
     static let eventHandlerName = "tagnologyEvent"
     static let eventTypeKey = "eventType"
     static let bridgeInjectionFlag = "__tagnologyNativeBridgeInjected"
-    static let hitTestHandlerName = "tagnologyHitTest"
-}
-
-// MARK: - Overlay Window (click-through with smart detection)
-final class PassthroughWindow: UIWindow {
-    var clickableRects: [CGRect] = []
-    var hasClickableContent: Bool = false
-    
-    override init(windowScene: UIWindowScene) {
-        super.init(windowScene: windowScene)
-    }
-    
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-    
-    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
-        // 如果有可點擊內容，檢查是否在區域內
-        if hasClickableContent && !clickableRects.isEmpty {
-            for rect in clickableRects {
-                if rect.contains(point) {
-                    return super.hitTest(point, with: event)
-                }
-            }
-        }
-        
-        // 不在可點擊區域內，穿透到下層
-        return nil
-    }
-}
-
-final class FloatingOverlayManager {
-    static let shared = FloatingOverlayManager()
-    private var window: PassthroughWindow?
-    private var hostingController: UIHostingController<AnyView>?
-    private var currentOwnerId: String?
-    weak var webView: WKWebView?  // 保存 WebView 引用用於座標轉換
-    private var lastRects: [CGRect] = []  // 緩存上次的 rects，避免重複更新
-
-    func showOverlay<V: View>(ownerId: String, view: V) {
-        guard let windowScene = UIApplication.shared.connectedScenes
-            .compactMap({ $0 as? UIWindowScene })
-            .first(where: { $0.activationState == .foregroundActive || $0.activationState == .foregroundInactive }) else { return }
-
-        if window == nil {
-            let newWindow = PassthroughWindow(windowScene: windowScene)
-            newWindow.backgroundColor = .clear
-            newWindow.windowLevel = .statusBar + 1
-            window = newWindow
-        }
-        let controller = UIHostingController(rootView: AnyView(view))
-        controller.view.backgroundColor = .clear
-        hostingController = controller
-        window?.rootViewController = controller
-        window?.isHidden = false
-        currentOwnerId = ownerId
-    }
-
-    func hideOverlay(ownerId: String) {
-        guard currentOwnerId == ownerId else { return }
-        window?.isHidden = true
-        window?.rootViewController = nil
-        hostingController = nil
-        currentOwnerId = nil
-        webView = nil
-    }
-    
-    func updateClickableRectFromResizeEvent(property: [String: Any]?) {
-        guard let window = window else {
-            return
-        }
-        
-        guard let property = property else {
-            return
-        }
-        
-        // 使用完整的 window bounds，不包含安全區域
-        let windowBounds = window.bounds
-        
-        // 提取所有相關屬性
-        let widthRaw = property["width"]
-        let heightRaw = property["height"]
-        let rightRaw = property["right"]
-        let bottomRaw = property["bottom"]
-        let leftRaw = property["left"]
-        let topRaw = property["top"]
-        
-        // 檢查是否為全螢幕狀態：width = 100dvw, height = 100dvh, top = 0, left = 0
-        let isFullscreen = checkIfFullscreen(
-            width: widthRaw,
-            height: heightRaw,
-            left: leftRaw,
-            top: topRaw,
-            windowBounds: windowBounds
-        )
-        
-        if isFullscreen {
-            // 全螢幕狀態：將整個 window 設為可點擊區域
-            let rect = windowBounds
-            
-            // 只有當 rect 真正改變時才更新
-            let hasChanged: Bool
-            if lastRects.count != 1 {
-                hasChanged = true
-            } else if let lastRect = lastRects.first {
-                let dx = abs(lastRect.origin.x - rect.origin.x)
-                let dy = abs(lastRect.origin.y - rect.origin.y)
-                let dw = abs(lastRect.width - rect.width)
-                let dh = abs(lastRect.height - rect.height)
-                hasChanged = dx > 1 || dy > 1 || dw > 1 || dh > 1
-            } else {
-                hasChanged = true
-            }
-            
-            if hasChanged {
-                window.clickableRects = [rect]
-                window.hasClickableContent = true
-                lastRects = [rect]
-            }
-            return
-        }
-        
-        // 非全螢幕狀態：正常計算位置
-        // 提取尺寸
-        let width = extractPixelValue(from: widthRaw, windowBounds: windowBounds)
-        let height = extractPixelValue(from: heightRaw, windowBounds: windowBounds)
-        
-        guard width > 0, height > 0 else {
-            return
-        }
-        
-        var x: CGFloat = 0
-        var y: CGFloat = 0
-        
-        // 調整參數
-        let horizontalPadding: CGFloat = 24.0  // left/right 各減少 24px（總共減少 48px）
-        let verticalPadding: CGFloat = 18.0    // top/bottom 各增加 18px（總共增加 36px）
-        
-        // 計算 x 座標和調整寬度
-        var adjustedX: CGFloat = 0
-        var adjustedWidth: CGFloat = width
-        
-        if let right = rightRaw as? String, right != "auto" {
-            let rightValue = extractPixelValue(from: right, windowBounds: windowBounds)
-            x = windowBounds.width - width - rightValue
-            // 使用 right 定位時：向右移動 12px，寬度減少 24px
-            adjustedX = x + horizontalPadding
-            adjustedWidth = max(0, width - horizontalPadding * 2)
-        } else if let right = rightRaw as? NSNumber {
-            let rightValue = CGFloat(truncating: right)
-            x = windowBounds.width - width - rightValue
-            // 使用 right 定位時：向右移動 12px，寬度減少 24px
-            adjustedX = x + horizontalPadding
-            adjustedWidth = max(0, width - horizontalPadding * 2)
-        } else if let left = leftRaw as? String, left != "auto" {
-            x = extractPixelValue(from: left, windowBounds: windowBounds)
-            // 使用 left 定位時：向右移動 12px，寬度減少 24px
-            adjustedX = x + horizontalPadding
-            adjustedWidth = max(0, width - horizontalPadding * 2)
-        } else if let left = leftRaw as? NSNumber {
-            x = CGFloat(truncating: left)
-            // 使用 left 定位時：向右移動 12px，寬度減少 24px
-            adjustedX = x + horizontalPadding
-            adjustedWidth = max(0, width - horizontalPadding * 2)
-        } else {
-            // 預設居中：左右各減少 12px
-            x = (windowBounds.width - width) / 2
-            adjustedX = x + horizontalPadding
-            adjustedWidth = max(0, width - horizontalPadding * 2)
-        }
-        
-        // 計算 y 座標和調整高度
-        var adjustedY: CGFloat = 0
-        var adjustedHeight: CGFloat = height
-        
-        if let bottom = bottomRaw as? String, bottom != "auto" {
-            let bottomValue = extractPixelValue(from: bottom, windowBounds: windowBounds)
-            y = windowBounds.height - height - bottomValue
-            // 使用 bottom 定位時：向上移動 12px，高度增加 24px
-            adjustedY = max(0, y - verticalPadding)
-            adjustedHeight = height + verticalPadding * 2
-        } else if let bottom = bottomRaw as? NSNumber {
-            let bottomValue = CGFloat(truncating: bottom)
-            y = windowBounds.height - height - bottomValue
-            // 使用 bottom 定位時：向上移動 12px，高度增加 24px
-            adjustedY = max(0, y - verticalPadding)
-            adjustedHeight = height + verticalPadding * 2
-        } else if let top = topRaw as? String, top != "auto" {
-            y = extractPixelValue(from: top, windowBounds: windowBounds)
-            // 使用 top 定位時：向上移動 12px，高度增加 24px
-            adjustedY = max(0, y - verticalPadding)
-            adjustedHeight = height + verticalPadding * 2
-        } else if let top = topRaw as? NSNumber {
-            y = CGFloat(truncating: top)
-            // 使用 top 定位時：向上移動 12px，高度增加 24px
-            adjustedY = max(0, y - verticalPadding)
-            adjustedHeight = height + verticalPadding * 2
-        } else {
-            // 預設居中：上下各增加 12px
-            y = (windowBounds.height - height) / 2
-            adjustedY = max(0, y - verticalPadding)
-            adjustedHeight = height + verticalPadding * 2
-        }
-        
-        // 確保不會超出 window 邊界
-        if adjustedX < 0 {
-            adjustedX = 0
-        }
-        if adjustedX + adjustedWidth > windowBounds.width {
-            adjustedWidth = windowBounds.width - adjustedX
-        }
-        if adjustedY + adjustedHeight > windowBounds.height {
-            adjustedHeight = windowBounds.height - adjustedY
-        }
-        
-        let rect = CGRect(x: adjustedX, y: adjustedY, width: adjustedWidth, height: adjustedHeight)
-        
-        // 只有當 rect 真正改變時才更新
-        let hasChanged: Bool
-        if lastRects.count != 1 {
-            hasChanged = true
-        } else if let lastRect = lastRects.first {
-            // 允許 1 像素的誤差（避免浮點數精度問題）
-            let dx = abs(lastRect.origin.x - rect.origin.x)
-            let dy = abs(lastRect.origin.y - rect.origin.y)
-            let dw = abs(lastRect.width - rect.width)
-            let dh = abs(lastRect.height - rect.height)
-            hasChanged = dx > 1 || dy > 1 || dw > 1 || dh > 1
-        } else {
-            hasChanged = true
-        }
-        
-        if hasChanged {
-            window.clickableRects = [rect]
-            window.hasClickableContent = true
-            lastRects = [rect]
-        }
-    }
-    
-    private func checkIfFullscreen(width: Any?, height: Any?, left: Any?, top: Any?, windowBounds: CGRect) -> Bool {
-        // 檢查是否為全螢幕：width = 100dvw, height = 100dvh, top = 0, left = 0
-        let widthStr = (width as? String)?.lowercased() ?? ""
-        let heightStr = (height as? String)?.lowercased() ?? ""
-        let leftStr = (left as? String)?.lowercased() ?? ""
-        let topStr = (top as? String)?.lowercased() ?? ""
-        
-        let isFullscreenWidth = widthStr == "100dvw" || widthStr == "100vw" || 
-                               (widthStr.contains("100") && (widthStr.contains("vw") || widthStr.contains("dvw")))
-        let isFullscreenHeight = heightStr == "100dvh" || heightStr == "100vh" ||
-                                (heightStr.contains("100") && (heightStr.contains("vh") || heightStr.contains("dvh")))
-        let isLeftZero = leftStr == "0" || leftStr == "0px" || (left as? NSNumber)?.doubleValue == 0
-        let isTopZero = topStr == "0" || topStr == "0px" || (top as? NSNumber)?.doubleValue == 0
-        
-        return isFullscreenWidth && isFullscreenHeight && isLeftZero && isTopZero
-    }
-    
-    private func extractPixelValue(from value: Any?, windowBounds: CGRect? = nil) -> CGFloat {
-        guard let value = value else {
-            return 0
-        }
-        
-        if let number = value as? NSNumber {
-            return CGFloat(truncating: number)
-        }
-        
-        if let string = value as? String {
-            let lowercased = string.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
-            
-            // 處理視口單位：100dvw, 100vw, 100dvh, 100vh
-            if lowercased.contains("dvw") || lowercased.contains("vw") {
-                let cleaned = lowercased.replacingOccurrences(of: "dvw", with: "")
-                    .replacingOccurrences(of: "vw", with: "")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                if let percent = Double(cleaned), let bounds = windowBounds {
-                    return bounds.width * CGFloat(percent) / 100.0
-                }
-            }
-            
-            if lowercased.contains("dvh") || lowercased.contains("vh") {
-                let cleaned = lowercased.replacingOccurrences(of: "dvh", with: "")
-                    .replacingOccurrences(of: "vh", with: "")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                if let percent = Double(cleaned), let bounds = windowBounds {
-                    return bounds.height * CGFloat(percent) / 100.0
-                }
-            }
-            
-            // 移除 "px" 後綴並轉換為數字
-            let cleaned = string.replacingOccurrences(of: "px", with: "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            if let doubleValue = Double(cleaned) {
-                return CGFloat(doubleValue)
-            }
-        }
-        
-        return 0
-    }
-    
-    func updateClickableRects(_ rects: [CGRect], webView: WKWebView?) {
-        // 在 floating mode 下，我們使用 resize event 來更新位置，忽略 JavaScript 的自動更新
-        // 因為 JavaScript 的 getBoundingClientRect() 對於 fixed 元素可能不準確
-        // 此函數僅用於記錄，實際位置更新由 updateClickableRectFromResizeEvent 處理
-    }
 }
 
 // MARK: - Position Enum
@@ -342,6 +29,12 @@ public enum EmbedPosition: String, Codable {
     case BELOW_MAIN_PRODUCT_INFO = "BELOW_MAIN_PRODUCT_INFO"
     case ABOVE_RECOMMENDATION = "ABOVE_RECOMMENDATION"
     case ABOVE_FILTER = "ABOVE_FILTER"
+	case FIXED_BOTTOM_LEFT = "FIXED_BOTTOM_LEFT"
+	case FIXED_BOTTOM_RIGHT = "FIXED_BOTTOM_RIGHT"
+	case FIXED_TOP_LEFT = "FIXED_TOP_LEFT"
+	case FIXED_TOP_RIGHT = "FIXED_TOP_RIGHT"
+	case FIXED_CENTER_LEFT = "FIXED_CENTER_LEFT"
+	case FIXED_CENTER_RIGHT = "FIXED_CENTER_RIGHT"
 }
 
 // MARK: - SDK Namespace
@@ -358,6 +51,12 @@ public enum EmbedIOSSDK {
     public static let BELOW_MAIN_PRODUCT_INFO = EmbedPosition.BELOW_MAIN_PRODUCT_INFO
     public static let ABOVE_RECOMMENDATION = EmbedPosition.ABOVE_RECOMMENDATION
     public static let ABOVE_FILTER = EmbedPosition.ABOVE_FILTER
+	public static let FIXED_BOTTOM_LEFT = EmbedPosition.FIXED_BOTTOM_LEFT
+	public static let FIXED_BOTTOM_RIGHT = EmbedPosition.FIXED_BOTTOM_RIGHT
+	public static let FIXED_TOP_LEFT = EmbedPosition.FIXED_TOP_LEFT
+	public static let FIXED_TOP_RIGHT = EmbedPosition.FIXED_TOP_RIGHT
+	public static let FIXED_CENTER_LEFT = EmbedPosition.FIXED_CENTER_LEFT
+	public static let FIXED_CENTER_RIGHT = EmbedPosition.FIXED_CENTER_RIGHT
 }
 
 // MARK: - API
@@ -421,6 +120,14 @@ public enum EmbedAPI {
     /**
      * @function fetchPageInfo
      * @description Fetches page information including embed widgets from the server.
+     *              Note: When layout is "FloatingMedia", the response will include an additional
+     *              floatingMediaPosition field with possible values:
+     *              - "TopRight"
+     *              - "CenterRight"
+     *              - "BottomRight"
+     *              - "TopLeft"
+     *              - "CenterLeft"
+     *              - "BottomLeft"
      *
      * @param {String} productId - The product ID to fetch information for.
      * @param {String} platform - The platform identifier (e.g., "91APP").
@@ -430,7 +137,13 @@ public enum EmbedAPI {
      * @throws {URLError} If the URL is invalid or the request fails.
      */
     public static func fetchPageInfo(productId: String, platform: String, pageUrl: String) async throws -> PageInfoResponse {
+        print("[EmbedAPI] fetchPageInfo called")
+        print("[EmbedAPI]   - productId: \(productId)")
+        print("[EmbedAPI]   - platform: \(platform)")
+        print("[EmbedAPI]   - pageUrl: \(pageUrl)")
+        
         guard let url = URL(string: "https://embed.tagnology.co/api/product/getPageInfo") else {
+            print("[EmbedAPI] ERROR: Invalid URL")
             throw URLError(.badURL)
         }
         var request = URLRequest(url: url)
@@ -443,10 +156,24 @@ public enum EmbedAPI {
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [])
         
+        print("[EmbedAPI] Sending request to: \(url.absoluteString)")
         let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+        
+        guard let http = response as? HTTPURLResponse else {
+            print("[EmbedAPI] ERROR: Invalid response type")
             throw URLError(.badServerResponse)
         }
+        
+        print("[EmbedAPI] Response status code: \(http.statusCode)")
+        
+        guard 200..<300 ~= http.statusCode else {
+            print("[EmbedAPI] ERROR: Bad status code \(http.statusCode)")
+            if let responseString = String(data: data, encoding: .utf8) {
+                print("[EmbedAPI] Response body: \(responseString)")
+            }
+            throw URLError(.badServerResponse)
+        }
+        
         let decoded = try JSONDecoder().decode(PageInfoResponse.self, from: data)
         return decoded
     }
@@ -486,8 +213,46 @@ public enum EmbedAPI {
         
         // 根據 position 過濾 widgets
         let positionString = position.rawValue
+        let expectedFloatingMediaPosition: String? = {
+            switch position {
+            case .FIXED_BOTTOM_LEFT:
+                return "BottomLeft"
+            case .FIXED_BOTTOM_RIGHT:
+                return "BottomRight"
+            case .FIXED_TOP_LEFT:
+                return "TopLeft"
+            case .FIXED_TOP_RIGHT:
+                return "TopRight"
+            case .FIXED_CENTER_LEFT:
+                return "CenterLeft"
+            case .FIXED_CENTER_RIGHT:
+                return "CenterRight"
+            default:
+                return nil
+            }
+        }()
+        let isFixedPosition = expectedFloatingMediaPosition != nil
+        
         let filteredWidgets = response.pageInfo.filter { folderInfo in
-            // 檢查 embedLocation 是否匹配 position
+            let isFloatingMedia = folderInfo.layout?.lowercased() == "floatingmedia"
+            
+            // 如果是 FIXED_* 位置，需要匹配 FloatingMedia 的 floatingMediaPosition
+            if isFixedPosition {
+                if isFloatingMedia {
+                    let widgetFloatingMediaPosition = folderInfo.floatingMediaPosition
+                    return widgetFloatingMediaPosition == expectedFloatingMediaPosition
+                } else {
+                    // FIXED_* 位置只顯示 FloatingMedia widgets
+                    return false
+                }
+            }
+            
+            // 非 FIXED 位置：不允許顯示 FloatingMedia widgets
+            if isFloatingMedia {
+                return false
+            }
+            
+            // 正常過濾：根據 embedLocation 匹配（非 FIXED 位置，且非 FloatingMedia）
             if let embedLocation = folderInfo.embedLocation {
                 let embedLocationUpper = embedLocation.uppercased().trimmingCharacters(in: .whitespacesAndNewlines)
                 let positionStringTrimmed = positionString.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -510,6 +275,12 @@ public enum EmbedAPI {
 }
 
 // MARK: - Models
+/**
+ * @struct EmbedFolderInfo
+ * @description Information about an embed widget folder.
+ *              When layout is "FloatingMedia", floatingMediaPosition will be present with values:
+ *              "TopRight", "CenterRight", "BottomRight", "TopLeft", "CenterLeft", "BottomLeft"
+ */
 public struct EmbedFolderInfo: Identifiable, Codable, Hashable {
     public let folderId: String
     public let productId: String?
@@ -521,10 +292,14 @@ public struct EmbedFolderInfo: Identifiable, Codable, Hashable {
     public let timestamp: Int?
     public let folderName: String?
     public let layout: String?
+    public let setting: Int?
+    /// FloatingMedia position. Only present when layout is "FloatingMedia".
+    /// Possible values: "TopRight", "CenterRight", "BottomRight", "TopLeft", "CenterLeft", "BottomLeft"
+    public let floatingMediaPosition: String?
 
     public var id: String { folderId }
     
-    public init(folderId: String, productId: String? = nil, platform: String? = nil, productName: String? = nil, productUrl: String? = nil, productImage: String? = nil, embedLocation: String? = nil, timestamp: Int? = nil, folderName: String? = nil, layout: String? = nil) {
+    public init(folderId: String, productId: String? = nil, platform: String? = nil, productName: String? = nil, productUrl: String? = nil, productImage: String? = nil, embedLocation: String? = nil, timestamp: Int? = nil, folderName: String? = nil, layout: String? = nil, setting: Int? = nil, floatingMediaPosition: String? = nil) {
         self.folderId = folderId
         self.productId = productId
         self.platform = platform
@@ -535,6 +310,246 @@ public struct EmbedFolderInfo: Identifiable, Codable, Hashable {
         self.timestamp = timestamp
         self.folderName = folderName
         self.layout = layout
+        self.setting = setting
+        self.floatingMediaPosition = floatingMediaPosition
+    }
+}
+
+// MARK: - EmbedWidgetDataManager (Shared Data Manager)
+/**
+ * @class EmbedWidgetDataManager
+ * @description Manages shared data for embed widgets to avoid multiple API calls for the same page URL.
+ *              All EmbedWidgetView instances with the same pageUrl will share the same data source.
+ */
+@available(iOS 16.0, *)
+@MainActor
+public class EmbedWidgetDataManager: ObservableObject {
+    public static let shared = EmbedWidgetDataManager()
+    
+    private var cache: [String: CacheEntry] = [:]
+    private var loadingTasks: [String: Task<Void, Never>] = [:]
+    
+    private struct CacheEntry {
+        let pageInfo: [EmbedFolderInfo]
+        let timestamp: Date
+    }
+    
+    private init() {}
+    
+    /**
+     * @function getWidgetsForPosition
+     * @description Gets widgets for a specific position from cached data or fetches from API if needed.
+     *
+     * @param {String} pageUrl - The page URL where the widget is displayed.
+     * @param {EmbedPosition} position - The position where the widget should be displayed.
+     * @param {String?} productId - Optional product ID. If not provided, will be extracted from pageUrl.
+     * @param {String} platform - Platform identifier. Defaults to "91APP".
+     *
+     * @returns {[EmbedFolderInfo]} Array of embed folder information matching the specified position.
+     */
+    func getWidgetsForPosition(
+        pageUrl: String,
+        position: EmbedPosition,
+        productId: String? = nil,
+        platform: String = EmbedAPI.defaultPlatform
+    ) async -> [EmbedFolderInfo] {
+        let cacheKey = pageUrl
+        let positionString = position.rawValue
+        
+        print("[EmbedWidgetDataManager] getWidgetsForPosition called - pageUrl: \(pageUrl), position: \(positionString)")
+        
+        // 檢查快取
+        if let cached = cache[cacheKey] {
+            print("[EmbedWidgetDataManager] Cache hit! Found \(cached.pageInfo.count) widgets in cache")
+            let filtered = filterWidgetsByPosition(cached.pageInfo, position: position)
+            print("[EmbedWidgetDataManager] After filtering by position \(positionString): \(filtered.count) widgets")
+            return filtered
+        }
+        
+        print("[EmbedWidgetDataManager] Cache miss")
+        
+        // 如果正在載入，等待載入完成
+        if let loadingTask = loadingTasks[cacheKey] {
+            print("[EmbedWidgetDataManager] Already loading, waiting for existing task...")
+            // 使用 Task.value 等待任務完成（忽略返回值）
+            let _: Void = await loadingTask.value
+            if let cached = cache[cacheKey] {
+                print("[EmbedWidgetDataManager] Load completed, found \(cached.pageInfo.count) widgets")
+                let filtered = filterWidgetsByPosition(cached.pageInfo, position: position)
+                print("[EmbedWidgetDataManager] After filtering by position \(positionString): \(filtered.count) widgets")
+                return filtered
+            } else {
+                print("[EmbedWidgetDataManager] Load completed but cache is empty (possible error)")
+            }
+        }
+        
+        // 開始載入
+        let finalProductId = productId ?? EmbedAPI.extractProductIdFromPageUrl(pageUrl) ?? ""
+        print("[EmbedWidgetDataManager] Starting new load - productId: \(finalProductId), platform: \(platform)")
+        
+        guard !finalProductId.isEmpty else {
+            print("[EmbedWidgetDataManager] ERROR: productId is empty, returning empty array")
+            return []
+        }
+        
+        // 創建載入任務
+        let task = Task { @MainActor in
+            do {
+                print("[EmbedWidgetDataManager] Calling API fetchPageInfo...")
+                let response = try await EmbedAPI.fetchPageInfo(
+                    productId: finalProductId,
+                    platform: platform,
+                    pageUrl: pageUrl
+                )
+                
+                print("[EmbedWidgetDataManager] API call successful! Received \(response.pageInfo.count) widgets")
+                for (index, widget) in response.pageInfo.enumerated() {
+                    print("[EmbedWidgetDataManager] Widget[\(index)]: folderId=\(widget.folderId), embedLocation=\(widget.embedLocation ?? "nil"), layout=\(widget.layout ?? "nil")")
+                }
+                
+                self.cache[cacheKey] = CacheEntry(
+                    pageInfo: response.pageInfo,
+                    timestamp: Date()
+                )
+                self.loadingTasks.removeValue(forKey: cacheKey)
+                print("[EmbedWidgetDataManager] Cache updated and loading task removed")
+            } catch {
+                print("[EmbedWidgetDataManager] ERROR in API call: \(error.localizedDescription)")
+                self.loadingTasks.removeValue(forKey: cacheKey)
+            }
+        }
+        
+        loadingTasks[cacheKey] = task
+        print("[EmbedWidgetDataManager] Waiting for task to complete...")
+        // 使用 Task.value 等待任務完成（忽略返回值）
+        let _: Void = await task.value
+        print("[EmbedWidgetDataManager] Task completed")
+        
+        // 載入完成後再次檢查快取
+        if let cached = cache[cacheKey] {
+            print("[EmbedWidgetDataManager] After load, found \(cached.pageInfo.count) widgets in cache")
+            let filtered = filterWidgetsByPosition(cached.pageInfo, position: position)
+            print("[EmbedWidgetDataManager] After filtering by position \(positionString): \(filtered.count) widgets")
+            return filtered
+        }
+        
+        print("[EmbedWidgetDataManager] WARNING: Cache is still empty after load, returning empty array")
+        return []
+    }
+    
+    /**
+     * @function getFloatingMediaPositionForEmbedPosition
+     * @description Maps EmbedPosition to corresponding floatingMediaPosition value.
+     *
+     * @param {EmbedPosition} position - The EmbedPosition to map.
+     *
+     * @returns {String?} The corresponding floatingMediaPosition value, or nil if not a FIXED position.
+     */
+    private func getFloatingMediaPositionForEmbedPosition(_ position: EmbedPosition) -> String? {
+        switch position {
+        case .FIXED_BOTTOM_LEFT:
+            return "BottomLeft"
+        case .FIXED_BOTTOM_RIGHT:
+            return "BottomRight"
+        case .FIXED_TOP_LEFT:
+            return "TopLeft"
+        case .FIXED_TOP_RIGHT:
+            return "TopRight"
+        case .FIXED_CENTER_LEFT:
+            return "CenterLeft"
+        case .FIXED_CENTER_RIGHT:
+            return "CenterRight"
+        default:
+            return nil
+        }
+    }
+    
+    /**
+     * @function filterWidgetsByPosition
+     * @description Filters widgets by position and sorts them by timestamp.
+     *              For FIXED_* positions, matches FloatingMedia widgets by floatingMediaPosition.
+     *
+     * @param {[EmbedFolderInfo]} widgets - Array of widgets to filter.
+     * @param {EmbedPosition} position - The position to filter by.
+     *
+     * @returns {[EmbedFolderInfo]} Filtered and sorted widgets.
+     */
+    private func filterWidgetsByPosition(_ widgets: [EmbedFolderInfo], position: EmbedPosition) -> [EmbedFolderInfo] {
+        let positionString = position.rawValue
+        let expectedFloatingMediaPosition = getFloatingMediaPositionForEmbedPosition(position)
+        let isFixedPosition = expectedFloatingMediaPosition != nil
+        print("[EmbedWidgetDataManager] filterWidgetsByPosition - input: \(widgets.count) widgets, position: \(positionString), isFixedPosition: \(isFixedPosition), expectedFloatingMediaPosition: \(expectedFloatingMediaPosition ?? "nil")")
+        
+        let filteredWidgets = widgets.filter { folderInfo in
+            let isFloatingMedia = folderInfo.layout?.lowercased() == "floatingmedia"
+            
+            // 如果是 FIXED_* 位置，需要匹配 FloatingMedia 的 floatingMediaPosition
+            if isFixedPosition {
+                if isFloatingMedia {
+                    let widgetFloatingMediaPosition = folderInfo.floatingMediaPosition
+                    let matches = widgetFloatingMediaPosition == expectedFloatingMediaPosition
+                    if matches {
+                        print("[EmbedWidgetDataManager] Filter: Including FloatingMedia widget \(folderInfo.folderId) - floatingMediaPosition '\(widgetFloatingMediaPosition ?? "nil")' matches position \(positionString)")
+                    } else {
+                        print("[EmbedWidgetDataManager] Filter: Excluding FloatingMedia widget \(folderInfo.folderId) - floatingMediaPosition '\(widgetFloatingMediaPosition ?? "nil")' != expected '\(expectedFloatingMediaPosition ?? "nil")'")
+                    }
+                    return matches
+                } else {
+                    // FIXED_* 位置只顯示 FloatingMedia widgets
+                    print("[EmbedWidgetDataManager] Filter: Excluding non-FloatingMedia widget \(folderInfo.folderId) for FIXED position \(positionString)")
+                    return false
+                }
+            }
+            
+            // 非 FIXED 位置：不允許顯示 FloatingMedia widgets
+            if isFloatingMedia {
+                print("[EmbedWidgetDataManager] Filter: Excluding FloatingMedia widget \(folderInfo.folderId) - FloatingMedia can only be displayed in FIXED_* positions")
+                return false
+            }
+            
+            // 正常過濾：根據 embedLocation 匹配（非 FIXED 位置，且非 FloatingMedia）
+            if let embedLocation = folderInfo.embedLocation {
+                let embedLocationUpper = embedLocation.uppercased().trimmingCharacters(in: .whitespacesAndNewlines)
+                let positionStringTrimmed = positionString.trimmingCharacters(in: .whitespacesAndNewlines)
+                let matches = embedLocationUpper == positionStringTrimmed
+                if !matches {
+                    print("[EmbedWidgetDataManager] Filter: widget \(folderInfo.folderId) location '\(embedLocationUpper)' != '\(positionStringTrimmed)'")
+                } else {
+                    print("[EmbedWidgetDataManager] Filter: widget \(folderInfo.folderId) location '\(embedLocationUpper)' matches '\(positionStringTrimmed)'")
+                }
+                return matches
+            }
+            print("[EmbedWidgetDataManager] Filter: widget \(folderInfo.folderId) has no embedLocation")
+            return false
+        }
+        
+        print("[EmbedWidgetDataManager] filterWidgetsByPosition - after filter: \(filteredWidgets.count) widgets")
+        
+        // 對過濾後的 widgets 進行排序：按照 timestamp 降序（較新的先顯示）
+        let sortedWidgets = filteredWidgets.sorted { folderInfo1, folderInfo2 in
+            let timestamp1 = folderInfo1.timestamp ?? 0
+            let timestamp2 = folderInfo2.timestamp ?? 0
+            return timestamp1 > timestamp2
+        }
+        
+        print("[EmbedWidgetDataManager] filterWidgetsByPosition - after sort: \(sortedWidgets.count) widgets")
+        return sortedWidgets
+    }
+    
+    /**
+     * @function clearCache
+     * @description Clears the cache for a specific page URL or all cache.
+     *
+     * @param {String?} pageUrl - Optional page URL to clear. If nil, clears all cache.
+     */
+    public func clearCache(for pageUrl: String? = nil) {
+        if let pageUrl = pageUrl {
+            cache.removeValue(forKey: pageUrl)
+            loadingTasks.removeValue(forKey: pageUrl)
+        } else {
+            cache.removeAll()
+            loadingTasks.removeAll()
+        }
     }
 }
 
@@ -542,8 +557,9 @@ public struct EmbedFolderInfo: Identifiable, Codable, Hashable {
 /**
  * @struct EmbedWidgetView
  * @description A SwiftUI view that automatically loads and displays embed widgets based on page URL and position.
- *              This view handles API calls internally and only displays widgets when data is available.
+ *              This view uses a shared data manager to avoid multiple API calls for the same page URL.
  */
+@available(iOS 16.0, *)
 public struct EmbedWidgetView: View {
     private let pageUrl: String
     private let position: EmbedPosition
@@ -575,78 +591,6 @@ public struct EmbedWidgetView: View {
         self.productId = EmbedAPI.extractProductIdFromPageUrl(pageUrl)
         // 使用預設平台
         self.platform = EmbedAPI.defaultPlatform
-        
-        // 在 init 完成後立即開始載入 widgets（不等待 onAppear）
-        let productIdToLoad = self.productId
-        let platformToLoad = self.platform
-        let pageUrlToLoad = self.pageUrl
-        let positionToLoad = self.position
-        
-        // 同時進行 log 和載入
-        Task {
-            // 先進行 log
-            await EmbedWidgetView.fetchAndLogPageInfo(
-                productId: productIdToLoad,
-                platform: platformToLoad,
-                pageUrl: pageUrlToLoad,
-                position: positionToLoad
-            )
-        }
-        
-        // 立即開始載入 widgets（使用延遲執行來避免在 init 中直接修改 @State）
-        // 注意：在 init 中無法直接修改 @State，所以我們在 body 第一次計算時觸發載入
-    }
-    
-    /**
-     * @function fetchAndLogPageInfo
-     * @description 呼叫 getPageInfo API 並將相關資訊 log 出來，並標註哪些 widget 會根據 embedLocation 被顯示
-     *
-     * @param {String?} productId - 產品 ID
-     * @param {String} platform - 平台識別碼
-     * @param {String} pageUrl - 頁面 URL
-     * @param {EmbedPosition} position - 要顯示的 widget 位置
-     */
-    private static func fetchAndLogPageInfo(
-        productId: String?,
-        platform: String,
-        pageUrl: String,
-        position: EmbedPosition
-    ) async {
-        guard let productId = productId else {
-            return
-        }
-        
-        do {
-            let response = try await EmbedAPI.fetchPageInfo(
-                productId: productId,
-                platform: platform,
-                pageUrl: pageUrl
-            )
-            
-            // 根據 position 過濾 widgets
-            let positionString = position.rawValue
-            let filteredWidgets = response.pageInfo.filter { folderInfo in
-                if let embedLocation = folderInfo.embedLocation {
-                    let embedLocationUpper = embedLocation.uppercased().trimmingCharacters(in: .whitespacesAndNewlines)
-                    let positionStringTrimmed = positionString.trimmingCharacters(in: .whitespacesAndNewlines)
-                    return embedLocationUpper == positionStringTrimmed
-                }
-                return false
-            }
-            
-            // 只顯示需要顯示的 widgets 資訊
-            if !filteredWidgets.isEmpty {
-                for folderInfo in filteredWidgets {
-                    print("position: \(positionString)")
-                    print("folderId: \(folderInfo.folderId)")
-                    print("folderName: \(folderInfo.folderName ?? "nil")")
-                    print("layout: \(folderInfo.layout ?? "nil")")
-                    print("---")
-                }
-            }
-        } catch {
-            // 錯誤時不輸出 log
-        }
     }
     
     public var body: some View {
@@ -655,6 +599,7 @@ public struct EmbedWidgetView: View {
             DispatchQueue.main.async {
                 if !self.hasStartedLoading {
                     self.hasStartedLoading = true
+                    print("[EmbedWidgetView] body - First render, triggering load for position: \(self.position.rawValue)")
                     Task {
                         await self.loadWidgets()
                     }
@@ -666,70 +611,165 @@ public struct EmbedWidgetView: View {
             if isLoading {
                 // 載入中時不顯示任何內容（或可選擇顯示載入指示器）
                 EmptyView()
+                    .onAppear {
+                        print("[EmbedWidgetView] body - Rendering: isLoading=true")
+                    }
             } else if errorMessage != nil {
                 // 錯誤時不顯示任何內容（或可選擇顯示錯誤訊息）
                 EmptyView()
+                    .onAppear {
+                        print("[EmbedWidgetView] body - Rendering: error=\(self.errorMessage ?? "unknown")")
+                    }
             } else if folderInfos.isEmpty {
                 // 沒有資料時不顯示
                 EmptyView()
+                    .onAppear {
+                        print("[EmbedWidgetView] body - Rendering: folderInfos.isEmpty=true")
+                    }
             } else {
-                // 有資料時顯示所有匹配的 widgets（依序垂直排列）
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(folderInfos, id: \.folderId) { folderInfo in
-                        EmbedView(folderInfo: folderInfo, pageUrl: pageUrl)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                // 過濾 widgets：對於 FIXED_* 位置，需要匹配 FloatingMedia 的 floatingMediaPosition
+                let expectedFloatingMediaPosition: String? = {
+                    switch position {
+                    case .FIXED_BOTTOM_LEFT:
+                        return "BottomLeft"
+                    case .FIXED_BOTTOM_RIGHT:
+                        return "BottomRight"
+                    case .FIXED_TOP_LEFT:
+                        return "TopLeft"
+                    case .FIXED_TOP_RIGHT:
+                        return "TopRight"
+                    case .FIXED_CENTER_LEFT:
+                        return "CenterLeft"
+                    case .FIXED_CENTER_RIGHT:
+                        return "CenterRight"
+                    default:
+                        return nil
+                    }
+                }()
+                let isFixedPosition = expectedFloatingMediaPosition != nil
+                
+                let filteredWidgets = folderInfos.filter { folderInfo in
+                    let isFloatingMedia = folderInfo.layout?.lowercased() == "floatingmedia"
+                    
+                    print("[EmbedWidgetView] Filtering widget - folderId: \(folderInfo.folderId), layout: \(folderInfo.layout ?? "nil"), position: \(position.rawValue), isFloatingMedia: \(isFloatingMedia), isFixedPosition: \(isFixedPosition)")
+                    
+                    // 如果是 FIXED_* 位置，需要匹配 FloatingMedia 的 floatingMediaPosition
+                    if isFixedPosition {
+                        if isFloatingMedia {
+                            let widgetFloatingMediaPosition = folderInfo.floatingMediaPosition
+                            let shouldShow = widgetFloatingMediaPosition == expectedFloatingMediaPosition
+                            print("[EmbedWidgetView] FloatingMedia widget - floatingMediaPosition: '\(widgetFloatingMediaPosition ?? "nil")', expected: '\(expectedFloatingMediaPosition ?? "nil")', shouldShow: \(shouldShow)")
+                            return shouldShow
+                        } else {
+                            // FIXED_* 位置只顯示 FloatingMedia widgets
+                            print("[EmbedWidgetView] Non-FloatingMedia widget for FIXED position - excluding")
+                            return false
+                        }
+                    }
+                    
+                    // 非 FIXED 位置：不允許顯示 FloatingMedia widgets
+                    if isFloatingMedia {
+                        print("[EmbedWidgetView] Excluding FloatingMedia widget - FloatingMedia can only be displayed in FIXED_* positions")
+                        return false
+                    }
+                    
+                    // 如果不是 FIXED 位置，且不是 FloatingMedia，正常顯示
+                    print("[EmbedWidgetView] Non-FIXED position widget (non-FloatingMedia) - showing")
+                    return true
+                }
+                
+                if filteredWidgets.isEmpty {
+                    // 過濾後沒有資料時不顯示
+                    EmptyView()
+                        .onAppear {
+                            print("[EmbedWidgetView] body - Rendering: All widgets filtered out for position \(self.position.rawValue)")
+                        }
+                } else {
+                    // 有資料時顯示所有匹配的 widgets（依序垂直排列）
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(filteredWidgets, id: \.folderId) { folderInfo in
+                            EmbedView(folderInfo: folderInfo, pageUrl: pageUrl)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                    .onAppear {
+                        print("[EmbedWidgetView] body - Rendering: \(filteredWidgets.count) widgets (filtered from \(self.folderInfos.count)) for position \(self.position.rawValue)")
                     }
                 }
-                .frame(maxWidth: .infinity)
             }
         }
     }
     
     /**
      * @function loadWidgets
-     * @description Loads widgets from the API based on the specified position.
+     * @description Loads widgets from the shared data manager based on the specified position.
+     *              Uses cached data if available to avoid multiple API calls.
      */
     private func loadWidgets() async {
+        print("[EmbedWidgetView] loadWidgets called - pageUrl: \(pageUrl), position: \(position.rawValue)")
+        
         // 使用 MainActor 確保狀態檢查和設置是原子操作
         let shouldLoad = await MainActor.run {
             if self.isLoading {
+                print("[EmbedWidgetView] Already loading, skipping...")
                 return false
             }
             if self.hasStartedLoading && !self.folderInfos.isEmpty {
+                print("[EmbedWidgetView] Already loaded with \(self.folderInfos.count) widgets, skipping...")
                 return false
             }
             // 設置載入狀態
+            print("[EmbedWidgetView] Setting loading state to true")
             self.isLoading = true
             self.errorMessage = nil
             return true
         }
         
         guard shouldLoad else {
+            print("[EmbedWidgetView] Should not load, returning early")
             return
         }
         
-        do {
-            let widgets = try await EmbedAPI.fetchPageInfoForPosition(
-                pageUrl: pageUrl,
-                position: position,
-                productId: productId,
-                platform: platform
-            )
-            
-            await MainActor.run {
-                self.folderInfos = widgets
-                self.isLoading = false
+        print("[EmbedWidgetView] Calling EmbedWidgetDataManager.shared.getWidgetsForPosition...")
+        
+        // 使用共享資料管理器，避免重複 API 呼叫
+        let widgets = await EmbedWidgetDataManager.shared.getWidgetsForPosition(
+            pageUrl: pageUrl,
+            position: position,
+            productId: productId,
+            platform: platform
+        )
+        
+        print("[EmbedWidgetView] Received \(widgets.count) widgets from data manager")
+        
+        // 載入完成後進行 log（僅在第一次載入時）
+        if !widgets.isEmpty {
+            let positionString = position.rawValue
+            print("[EmbedWidgetView] === Widgets for position \(positionString) ===")
+            for folderInfo in widgets {
+                print("[EmbedWidgetView] position: \(positionString)")
+                print("[EmbedWidgetView] folderId: \(folderInfo.folderId)")
+                print("[EmbedWidgetView] folderName: \(folderInfo.folderName ?? "nil")")
+                print("[EmbedWidgetView] layout: \(folderInfo.layout ?? "nil")")
+                print("[EmbedWidgetView] embedLocation: \(folderInfo.embedLocation ?? "nil")")
+                print("[EmbedWidgetView] ---")
             }
-        } catch {
-            await MainActor.run {
-                self.errorMessage = error.localizedDescription
-                self.isLoading = false
-            }
+        } else {
+            print("[EmbedWidgetView] WARNING: No widgets returned for position \(position.rawValue)")
+        }
+        
+        await MainActor.run {
+            print("[EmbedWidgetView] Updating folderInfos with \(widgets.count) widgets")
+            self.folderInfos = widgets
+            self.isLoading = false
+            print("[EmbedWidgetView] Loading complete, isLoading set to false")
         }
     }
 }
 
 // MARK: - EmbedView (SwiftUI)
+@available(iOS 16.0, *)
 public struct EmbedView: View {
     private let folderInfo: EmbedFolderInfo
 	private let pageUrl: String
@@ -739,7 +779,7 @@ public struct EmbedView: View {
     @State private var pendingLightboxMessageJSON: String?
     // 當 widget property position == fixed 時切換為 true，整個 WebView 會變成 fullscreen fixed
     @State private var isFullscreenFixed = false
-    @State private var hasInstalledFloatingOverlay = false
+    @State private var lightboxLoadFailed = false
 
     private var lightboxURL: URL {
         EmbedHTMLBuilder.lightBoxURL(pageUrl: pageUrl)
@@ -761,80 +801,84 @@ public struct EmbedView: View {
 
     public var body: some View {
         Group {
-            if (folderInfo.layout?.lowercased() == "floatingmedia") {
-                Color.clear
-                    .frame(height: 0.1)
-                    .onAppear { 
-                        installFloatingOverlay() 
+            ZStack {
+                EmbedWebView(
+                    folderId: folderInfo.folderId,
+                    pageUrl: pageUrl,
+                    layout: folderInfo.layout,
+                    contentHeight: $contentHeight,
+                    onEvent: handleEmbedEvent
+                )
+                .frame(maxWidth: .infinity)
+                .frame(height: {
+                    let isFloatingMedia = folderInfo.layout?.lowercased() == "floatingmedia"
+                    if isFloatingMedia {
+                        // FloatingMedia 強制使用 224px 高度
+                        return 224
+                    } else if isFullscreenFixed {
+                        return UIScreen.main.bounds.height
+                    } else {
+                        return max(contentHeight, 60)
                     }
-                    .onDisappear { 
-                        uninstallFloatingOverlay() 
-                    }
-            } else {
-                ZStack {
-                    EmbedWebView(
-                        folderId: folderInfo.folderId,
-                        pageUrl: pageUrl,
-                        contentHeight: $contentHeight,
-                        onEvent: handleEmbedEvent,
-                        isFloatingMode: false
-                    )
-                    .frame(maxWidth: .infinity)
-                    .frame(height: isFullscreenFixed ? UIScreen.main.bounds.height : max(contentHeight, 60))
-                    .background(Color.clear)
-                    .ignoresSafeArea(edges: isFullscreenFixed ? .all : .init())
-                    .interactiveDismissDisabledCompat(isFullscreenFixed)
-                    .zIndex(isFullscreenFixed ? 1 : 0)
-                }
+                }())
+                .background(Color.clear)
+                .ignoresSafeArea(edges: isFullscreenFixed ? .all : .init())
+                .interactiveDismissDisabledCompat(isFullscreenFixed)
+                .zIndex(isFullscreenFixed ? 1 : 0)
             }
         }
         // Lightbox（fullscreen）
         .fullScreenCover(isPresented: $isLightboxPresented) {
-            LightboxWebView(
-                url: lightboxURL,
-                messageJSON: $pendingLightboxMessageJSON,
-                onEvent: handleEmbedEvent
-            )
-            .background(Color.black.opacity(0.85))
-            .ignoresSafeArea()
-        }
-    }
-
-    private func installFloatingOverlay() {
-        guard !hasInstalledFloatingOverlay else { return }
-        let overlay = ZStack {
-            Color.clear
+            ZStack(alignment: .topTrailing) {
+                // Lightbox 內容
+                LightboxWebView(
+                    url: lightboxURL,
+                    messageJSON: $pendingLightboxMessageJSON,
+                    onEvent: handleEmbedEvent,
+                    loadFailed: $lightboxLoadFailed
+                )
+                .background(Color.black.opacity(0.95))
                 .ignoresSafeArea()
-                .allowsHitTesting(false)
-            // 右下角定位的浮動媒體 iframe（實際固定由內部 CSS: position: fixed; bottom/right）
-            EmbedWebView(
-                folderId: folderInfo.folderId,
-                pageUrl: pageUrl,
-                contentHeight: $contentHeight,
-                onEvent: handleEmbedEvent,
-                isFloatingMode: true
-            )
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color.clear)
-            .ignoresSafeArea()
-            .allowsHitTesting(true)  // 改為 true，讓 WebView 可以接收點擊
+                
+                // 只在載入失敗時顯示關閉按鈕
+                if lightboxLoadFailed {
+                    VStack {
+                        HStack {
+                            Spacer()
+                            Button(action: {
+                                handleLightboxToggle(false)
+                            }) {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.system(size: 36))
+                                    .foregroundColor(.white)
+                                    .background(
+                                        Circle()
+                                            .fill(Color.black.opacity(0.5))
+                                            .frame(width: 36, height: 36)
+                                    )
+                            }
+                            .padding(.top, 8)
+                            .padding(.trailing, 16)
+                        }
+                        Spacer()
+                    }
+                }
+            }
+            .interactiveDismissDisabled(false) // 允許下拉關閉
+            .onAppear {
+                // 重置載入失敗狀態
+                lightboxLoadFailed = false
+            }
         }
-        FloatingOverlayManager.shared.showOverlay(ownerId: folderInfo.folderId, view: overlay)
-        hasInstalledFloatingOverlay = true
     }
 
-    private func uninstallFloatingOverlay() {
-        if hasInstalledFloatingOverlay {
-            FloatingOverlayManager.shared.hideOverlay(ownerId: folderInfo.folderId)
-            hasInstalledFloatingOverlay = false
-        }
-    }
 
     // MARK: - Event handler
     private func handleEmbedEvent(_ event: EmbedWebView.EmbedEvent) {
         switch event.type {
         case "resize":
             handleResizeEventPayload(event.payload)
+			break
         case "click":
             guard let item = event.payload["data"] as? [String: Any] else {
                 return
@@ -886,28 +930,29 @@ public struct EmbedView: View {
 
     // MARK: - lightbox
     private func handleLightboxToggle(_ shouldOpen: Bool) {
-        isLightboxPresented = shouldOpen
-        if !shouldOpen {
-            pendingLightboxMessageJSON = nil
+        // 確保在主線程上執行
+        DispatchQueue.main.async {
+            self.isLightboxPresented = shouldOpen
+            if !shouldOpen {
+                self.pendingLightboxMessageJSON = nil
+                self.lightboxLoadFailed = false // 重置載入失敗狀態
+            }
         }
     }
 
     // MARK: - resize handling (保留原始邏輯，並加入 fixed detection)
     private func handleResizeEventPayload(_ payload: [String: Any]) {
+        // 對於 FloatingMedia，忽略 resize 事件，強制使用 224px 高度
+        let isFloatingMedia = folderInfo.layout?.lowercased() == "floatingmedia"
+        if isFloatingMedia {
+            contentHeight = 224
+            return
+        }
+        
         let property = payload["property"] as? [String: Any]
         let rawHeightFromProperty = extractRawHeightString(from: property)
         let shouldDefer = shouldDeferHeightSync(rawHeightFromProperty, property: property)
         let resolvedHeight = extractNumericHeight(from: payload, property: property)
-
-        if hasInstalledFloatingOverlay {
-            // 在 floating overlay 模式下，使用 property 來更新可點擊區域
-            // 如果 property 為 nil，這是正常的（例如某些 resize event 可能不包含 property）
-            // 我們只在有 property 時才更新，避免不必要的警告
-            if let property = property {
-                FloatingOverlayManager.shared.updateClickableRectFromResizeEvent(property: property)
-            }
-            // 注意：property 為 nil 時不更新是正常的，不需要警告
-        } 
 
         // 如果 widget 指定 position: fixed，切換為 fullscreen fixed（避免被外層壓扁）
         if let position = property?["position"] as? String, position.lowercased() == "fixed" {
@@ -1001,9 +1046,9 @@ public struct EmbedView: View {
 struct EmbedWebView: UIViewRepresentable {
     let folderId: String
     let pageUrl: String
+    let layout: String?
     @Binding var contentHeight: CGFloat
     let onEvent: (EmbedEvent) -> Void
-    let isFloatingMode: Bool
 
     struct EmbedEvent {
         let type: String
@@ -1023,110 +1068,19 @@ struct EmbedWebView: UIViewRepresentable {
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(parent: self, onEvent: onEvent, isFloatingMode: isFloatingMode)
+        Coordinator(parent: self, onEvent: onEvent)
     }
 
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = true
-        configuration.preferences.javaScriptEnabled = true
+        // iOS 16+ 使用新的 API 替代已棄用的 javaScriptEnabled (iOS 14.0+)
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = true
         configuration.allowsInlineMediaPlayback = true
-        if #available(iOS 10.0, *) {
-            configuration.mediaTypesRequiringUserActionForPlayback = []
-        } else {
-            configuration.requiresUserActionForMediaPlayback = false
-        }
+        // iOS 16+ 直接支援 mediaTypesRequiringUserActionForPlayback (iOS 10.0+)
+        configuration.mediaTypesRequiringUserActionForPlayback = []
         configuration.userContentController.add(context.coordinator, name: EmbedBridge.resizeHandlerName)
         configuration.userContentController.add(context.coordinator, name: EmbedBridge.eventHandlerName)
-        
-        // 如果是 floating 模式，添加 hitTest handler 和注入腳本
-        if isFloatingMode {
-            configuration.userContentController.add(context.coordinator, name: EmbedBridge.hitTestHandlerName)
-            
-            let hitTestScript = """
-            (function() {
-                let lastRectsString = '';
-                let updateTimer = null;
-                
-                function rectsToString(rects) {
-                    return JSON.stringify(rects.map(r => [r.x, r.y, r.width, r.height]));
-                }
-                
-                function updateClickableRegions() {
-                    const rects = [];
-                    const viewportWidth = window.innerWidth || document.documentElement.clientWidth;
-                    const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
-                    
-                    // 方案 1: 偵測所有 iframe（主要目標）
-                    const iframes = document.querySelectorAll('iframe');
-                    iframes.forEach(iframe => {
-                        const rect = iframe.getBoundingClientRect();
-                        if (rect.width > 0 && rect.height > 0) {
-                            // 對於 fixed 元素，getBoundingClientRect() 直接返回視口座標
-                            // 不需要額外計算，直接使用即可
-                            const x = Math.round(rect.left);
-                            const y = Math.round(rect.top);
-                            
-                            rects.push({
-                                x: x,
-                                y: y,
-                                width: Math.round(rect.width),
-                                height: Math.round(rect.height)
-                            });
-                            
-                            console.log('[Embed][updateClickableRegions] iframe rect:', {
-                                getBoundingClientRect: { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
-                                final: { x, y, width: rect.width, height: rect.height },
-                                viewport: { width: viewportWidth, height: viewportHeight }
-                            });
-                        }
-                    });
-                    
-                    // 方案 2: 偵測外層的可點擊元素（作為補充）
-                    const clickableElements = document.querySelectorAll('a, button, [onclick], [role="button"], [role="link"], input, select, textarea, video, audio, [style*="cursor: pointer"], [style*="cursor:pointer"]');
-                    clickableElements.forEach(element => {
-                        const rect = element.getBoundingClientRect();
-                        if (rect.width > 0 && rect.height > 0) {
-                            rects.push({
-                                x: Math.round(rect.left),
-                                y: Math.round(rect.top),
-                                width: Math.round(rect.width),
-                                height: Math.round(rect.height)
-                            });
-                        }
-                    });
-                    
-                    // 只有當 rects 真正改變時才發送
-                    const currentRectsString = rectsToString(rects);
-                    if (currentRectsString !== lastRectsString) {
-                        lastRectsString = currentRectsString;
-                        if (window.webkit?.messageHandlers?.tagnologyHitTest) {
-                            window.webkit.messageHandlers.tagnologyHitTest.postMessage({ rects: rects });
-                        }
-                    }
-                }
-                
-                // 防抖版本的更新函數
-                function debouncedUpdate() {
-                    if (updateTimer) {
-                        clearTimeout(updateTimer);
-                    }
-                    updateTimer = setTimeout(updateClickableRegions, 200);
-                }
-                
-                // 注意：在 floating mode 下，我們不使用 JavaScript 的自動更新
-                // 因為 getBoundingClientRect() 對於 fixed 元素可能不準確
-                // 位置更新由 resize event 的 property 來處理
-                // 所以這裡不啟動初始更新、定期更新和 DOM 監聽
-                
-                // 導出函數供外部調用（但不會自動執行）
-                window.updateClickableRegions = updateClickableRegions;
-            })();
-            """
-            
-            let userScript = WKUserScript(source: hitTestScript, injectionTime: .atDocumentEnd, forMainFrameOnly: false)
-            configuration.userContentController.addUserScript(userScript)
-        }
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
         // 若不允許 scroll，fixed 內部元素仍會相對於 viewport 定位（我們已 inject CSS workaround）
@@ -1150,7 +1104,7 @@ struct EmbedWebView: UIViewRepresentable {
     }
 
     private func loadWidget(into webView: WKWebView) {
-        let htmlString = EmbedHTMLBuilder.buildHTML(folderId: folderId, pageUrl: pageUrl)
+        let htmlString = EmbedHTMLBuilder.buildHTML(folderId: folderId, pageUrl: pageUrl, layout: layout)
         webView.loadHTMLString(htmlString, baseURL: EmbedHTMLBuilder.assetBaseURL)
     }
 
@@ -1158,13 +1112,11 @@ struct EmbedWebView: UIViewRepresentable {
     final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         private var parent: EmbedWebView
         private let onEvent: (EmbedEvent) -> Void
-        private let isFloatingMode: Bool
         weak var webView: WKWebView?
 
-        init(parent: EmbedWebView, onEvent: @escaping (EmbedEvent) -> Void, isFloatingMode: Bool) {
+        init(parent: EmbedWebView, onEvent: @escaping (EmbedEvent) -> Void) {
             self.parent = parent
             self.onEvent = onEvent
-            self.isFloatingMode = isFloatingMode
         }
 
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
@@ -1191,8 +1143,6 @@ struct EmbedWebView: UIViewRepresentable {
                 }
             case EmbedBridge.eventHandlerName:
                 handleEventMessage(message.body)
-            case EmbedBridge.hitTestHandlerName:
-                handleHitTestMessage(message.body)
             default: break
             }
         }
@@ -1201,35 +1151,6 @@ struct EmbedWebView: UIViewRepresentable {
             guard let embedEvent = EmbedWebView.makeEvent(from: body) else { return }
             DispatchQueue.main.async { [weak self] in
                 self?.onEvent(embedEvent)
-            }
-        }
-        
-        private func handleHitTestMessage(_ body: Any) {
-            guard isFloatingMode else {
-                return
-            }
-            
-            guard let payload = body as? [String: Any],
-                  let rectsArray = payload["rects"] as? [[String: Any]] else {
-                return
-            }
-            
-            var clickableRects: [CGRect] = []
-            for rectDict in rectsArray {
-                if let x = rectDict["x"] as? Double,
-                   let y = rectDict["y"] as? Double,
-                   let width = rectDict["width"] as? Double,
-                   let height = rectDict["height"] as? Double {
-                    let rect = CGRect(x: x, y: y, width: width, height: height)
-                    clickableRects.append(rect)
-                }
-            }
-            
-            DispatchQueue.main.async { [weak self] in
-                guard let webView = self?.webView else {
-                    return
-                }
-                FloatingOverlayManager.shared.updateClickableRects(clickableRects, webView: webView)
             }
         }
 
@@ -1244,10 +1165,6 @@ struct EmbedWebView: UIViewRepresentable {
                     }
                 }
             }
-            
-            // 注意：在 floating 模式，我們不使用 JavaScript 的 updateClickableRegions
-            // 位置更新由 resize event 的 property 來處理
-            // 所以這裡不需要主動觸發
         }
     }
 }
@@ -1257,18 +1174,17 @@ struct LightboxWebView: UIViewRepresentable {
     let url: URL
     @Binding var messageJSON: String?
     let onEvent: (EmbedWebView.EmbedEvent) -> Void
+    @Binding var loadFailed: Bool
 
-    func makeCoordinator() -> Coordinator { Coordinator(onEvent: onEvent) }
+    func makeCoordinator() -> Coordinator { Coordinator(onEvent: onEvent, loadFailed: $loadFailed) }
 
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
-        configuration.preferences.javaScriptEnabled = true
+        // iOS 16+ 使用新的 API 替代已棄用的 javaScriptEnabled (iOS 14.0+)
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = true
         configuration.allowsInlineMediaPlayback = true
-        if #available(iOS 10.0, *) {
-            configuration.mediaTypesRequiringUserActionForPlayback = []
-        } else {
-            configuration.requiresUserActionForMediaPlayback = false
-        }
+        // iOS 16+ 直接支援 mediaTypesRequiringUserActionForPlayback (iOS 10.0+)
+        configuration.mediaTypesRequiringUserActionForPlayback = []
         configuration.userContentController.add(context.coordinator, name: EmbedBridge.eventHandlerName)
 
         // 注入 bridge helper 至 Lightbox（同時支援 postMessage）
@@ -1329,14 +1245,30 @@ struct LightboxWebView: UIViewRepresentable {
         var pendingMessageJSON: String?
         private var isContentLoaded = false
         private let onEvent: (EmbedWebView.EmbedEvent) -> Void
+        @Binding var loadFailed: Bool
 
-        init(onEvent: @escaping (EmbedWebView.EmbedEvent) -> Void) {
+        init(onEvent: @escaping (EmbedWebView.EmbedEvent) -> Void, loadFailed: Binding<Bool>) {
             self.onEvent = onEvent
+            self._loadFailed = loadFailed
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             isContentLoaded = true
             flushPendingMessage()
+        }
+        
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            print("[LightboxWebView] Navigation failed: \(error.localizedDescription)")
+            DispatchQueue.main.async { [weak self] in
+                self?.loadFailed = true
+            }
+        }
+        
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            print("[LightboxWebView] Provisional navigation failed: \(error.localizedDescription)")
+            DispatchQueue.main.async { [weak self] in
+                self?.loadFailed = true
+            }
         }
 
         func flushPendingMessage() {
@@ -1388,10 +1320,80 @@ enum EmbedHTMLBuilder {
      *
      * @param {String} folderId - The folder ID for the embed widget.
      * @param {String} pageUrl - The page URL where the widget is displayed.
+     * @param {String?} layout - Optional layout type (e.g., "FloatingMedia").
      *
      * @returns {String} The HTML string containing the embed iframe.
      */
-    static func buildHTML(folderId: String, pageUrl: String) -> String {
+    static func buildHTML(folderId: String, pageUrl: String, layout: String? = nil) -> String {
+        // 構建 iframe src URL
+        var iframeSrc = "https://embed.tagnology.co/display?folderId=\(folderId)&page=\(pageUrl)"
+        
+        // 如果 layout 為 FloatingMedia，添加 fullScreen=true 參數
+        let isFloatingMedia = layout?.lowercased() == "floatingmedia"
+        if isFloatingMedia {
+            iframeSrc += "&fullScreen=true"
+        }
+
+        // 根據 layout 決定 iframe 的 CSS 樣式
+        // FloatingMedia 需要適應容器大小，其他 layout 使用全螢幕 fixed（Safari 14 workaround）
+        let iframeCSS: String
+        let containerCSS: String
+        if isFloatingMedia {
+            // FloatingMedia：使用容器 div 限制大小，iframe 適應容器（參考 test.html 結構）
+            containerCSS = """
+                #embed-container {
+                    width: 100%;
+                    height: 100%;
+                    max-width: 126px !important;
+                    max-height: 224px !important;
+                    position: relative;
+                    overflow: hidden !important;
+                    background: transparent;
+                    top: 0 !important;
+                    left: 0 !important;
+                    margin: 0 !important;
+                    padding: 0 !important;
+                    visibility: visible !important;
+                    opacity: 1 !important;
+                    z-index: 1 !important;
+                    display: block !important;
+                }
+            """
+            iframeCSS = """
+                iframe {
+                    border: none !important;
+                    width: 126px !important;
+                    height: 224px !important;
+                    max-width: 126px !important;
+                    max-height: 224px !important;
+                    position: relative !important;
+                    display: block !important;
+                    overflow: hidden !important;
+                    background: transparent;
+                    box-sizing: border-box !important;
+                    visibility: visible !important;
+                    opacity: 1 !important;
+                    z-index: 1 !important;
+                }
+            """
+        } else {
+            // 其他 layout：使用全螢幕 fixed（Safari 14 workaround）
+            containerCSS = ""
+            iframeCSS = """
+                iframe {
+                    border: 0;
+                    width: 100vw !important;
+                    height: 100vh !important;
+                    position: fixed !important;
+                    top: 0;
+                    left: 0;
+                    overflow: hidden;
+                    -webkit-overflow-scrolling: touch;
+                    background: transparent;
+                }
+            """
+        }
+
         // 這裡注入 CSS 的重點是：解 Safari 14 iframe + position:fixed 的 bug
         // 並仍保留 JS 來解析 widget 傳來的 property，並把 property 套到 iframe.style
         return """
@@ -1410,27 +1412,31 @@ enum EmbedHTMLBuilder {
                     width: 100%;
                     overflow: hidden;
                 }
-
-                /* SAFARI 14 WORKAROUND:
-                   為了讓 iframe 內的 position: fixed 元素在 iOS14/Safari14 正常生效，
-                   可以讓 iframe 自身在載入端以 fixed 方式呈現（或在需要時由 JS 設定）。
-                   這裡使用 safe defaults：讓 iframe 可以被 JS 覆寫高度與 position。
-                 */
-                iframe {
-                    border: 0;
-                    width: 100vw !important;
-                    height: 100vh !important;
-                    position: fixed !important;
-                    top: 0;
-                    left: 0;
-                    overflow: hidden;
-                    -webkit-overflow-scrolling: touch; /* 若需要滾動，可改為 touch */
-                    background: transparent;
+                
+                /* FloatingMedia 專用：限制 body/html 高度並確保正確定位 */
+                \(isFloatingMedia ? """
+                html, body {
+                    max-height: 224px !important;
+                    display: flex !important;
+                    align-items: flex-start !important;
+                    justify-content: flex-start !important;
                 }
+                """ : "")
+
+                /* 容器樣式（僅 FloatingMedia 使用） */
+                \(containerCSS)
+                /* Iframe 樣式（根據 layout 類型動態設定） */
+                \(iframeCSS)
             </style>
         </head>
         <body>
-            <iframe id="embed-frame" src="https://embed.tagnology.co/display?folderId=\(folderId)&page=\(pageUrl)" scrolling="no" frameborder="0" allow="fullscreen; autoplay; picture-in-picture" playsinline></iframe>
+            \(isFloatingMedia ? """
+            <div id="embed-container">
+                <iframe id="embed-frame" src="\(iframeSrc)" scrolling="no" frameborder="0" allow="fullscreen; autoplay; picture-in-picture" playsinline></iframe>
+            </div>
+            """ : """
+            <iframe id="embed-frame" src="\(iframeSrc)" scrolling="no" frameborder="0" allow="fullscreen; autoplay; picture-in-picture" playsinline></iframe>
+            """)
             <script>
             const frame = document.getElementById('embed-frame');
 
@@ -1509,16 +1515,29 @@ enum EmbedHTMLBuilder {
             }
 
             function handleResizeEvent(data) {
-                console.log('[Embed][handleResizeEvent]', data);
                 const property = (data && typeof data === 'object') ? data.property : null;
+                const container = document.getElementById('embed-container');
+                const isFloatingMedia = container !== null; // 如果有容器，就是 FloatingMedia
+                
                 if (property && frame) {
                     Object.keys(property).forEach((key) => {
                         if (!Object.prototype.hasOwnProperty.call(property, key)) return;
                         const value = property[key];
                         if (value === undefined || value === null) return;
+                        
+                        // 對於 FloatingMedia，忽略 position 屬性（保持 relative）
+                        if (isFloatingMedia && key.toLowerCase() === 'position') {
+                            return;
+                        }
+                        
                         // 套用到 iframe 上（frame.style）
                         frame.style.setProperty(String(key), String(value), 'important');
                     });
+                    
+                    // 對於 FloatingMedia，強制確保 position 是 relative
+                    if (isFloatingMedia) {
+                        frame.style.setProperty('position', 'relative', 'important');
+                    }
                 }
 
                 const rawPropertyHeight = getRawHeightFromProperty(property);
@@ -1570,7 +1589,6 @@ enum EmbedHTMLBuilder {
                 const initialHeight = frame?.getBoundingClientRect().height || 400;
                 applyFrameHeight(initialHeight);
                 notifyNativeResize(initialHeight);
-                console.log('[Embed][load] initialHeight', initialHeight);
             });
             </script>
         </body>
