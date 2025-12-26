@@ -859,7 +859,7 @@ struct FixedFloatingMediaWidgetView: View {
                             widgetHasRendered = true
                             checkForContent(height: geometry.size.height)
                         }
-                        .onChange(of: geometry.size.height) { _, newHeight in
+                        .onChange(of: geometry.size.height) { newHeight in
                             checkForContent(height: newHeight)
                         }
                 }
