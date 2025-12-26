@@ -30,6 +30,11 @@ public enum EmbedPosition: String, Codable {
     case ABOVE_RECOMMENDATION = "ABOVE_RECOMMENDATION"
     case ABOVE_FILTER = "ABOVE_FILTER"
 	case FIXED_BOTTOM_LEFT = "FIXED_BOTTOM_LEFT"
+	case FIXED_BOTTOM_RIGHT = "FIXED_BOTTOM_RIGHT"
+	case FIXED_TOP_LEFT = "FIXED_TOP_LEFT"
+	case FIXED_TOP_RIGHT = "FIXED_TOP_RIGHT"
+	case FIXED_CENTER_LEFT = "FIXED_CENTER_LEFT"
+	case FIXED_CENTER_RIGHT = "FIXED_CENTER_RIGHT"
 }
 
 // MARK: - SDK Namespace
@@ -47,6 +52,11 @@ public enum EmbedIOSSDK {
     public static let ABOVE_RECOMMENDATION = EmbedPosition.ABOVE_RECOMMENDATION
     public static let ABOVE_FILTER = EmbedPosition.ABOVE_FILTER
 	public static let FIXED_BOTTOM_LEFT = EmbedPosition.FIXED_BOTTOM_LEFT
+	public static let FIXED_BOTTOM_RIGHT = EmbedPosition.FIXED_BOTTOM_RIGHT
+	public static let FIXED_TOP_LEFT = EmbedPosition.FIXED_TOP_LEFT
+	public static let FIXED_TOP_RIGHT = EmbedPosition.FIXED_TOP_RIGHT
+	public static let FIXED_CENTER_LEFT = EmbedPosition.FIXED_CENTER_LEFT
+	public static let FIXED_CENTER_RIGHT = EmbedPosition.FIXED_CENTER_RIGHT
 }
 
 // MARK: - API
@@ -110,6 +120,14 @@ public enum EmbedAPI {
     /**
      * @function fetchPageInfo
      * @description Fetches page information including embed widgets from the server.
+     *              Note: When layout is "FloatingMedia", the response will include an additional
+     *              floatingMediaPosition field with possible values:
+     *              - "TopRight"
+     *              - "CenterRight"
+     *              - "BottomRight"
+     *              - "TopLeft"
+     *              - "CenterLeft"
+     *              - "BottomLeft"
      *
      * @param {String} productId - The product ID to fetch information for.
      * @param {String} platform - The platform identifier (e.g., "91APP").
@@ -119,7 +137,13 @@ public enum EmbedAPI {
      * @throws {URLError} If the URL is invalid or the request fails.
      */
     public static func fetchPageInfo(productId: String, platform: String, pageUrl: String) async throws -> PageInfoResponse {
+        print("[EmbedAPI] fetchPageInfo called")
+        print("[EmbedAPI]   - productId: \(productId)")
+        print("[EmbedAPI]   - platform: \(platform)")
+        print("[EmbedAPI]   - pageUrl: \(pageUrl)")
+        
         guard let url = URL(string: "https://embed.tagnology.co/api/product/getPageInfo") else {
+            print("[EmbedAPI] ERROR: Invalid URL")
             throw URLError(.badURL)
         }
         var request = URLRequest(url: url)
@@ -132,10 +156,24 @@ public enum EmbedAPI {
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [])
         
+        print("[EmbedAPI] Sending request to: \(url.absoluteString)")
         let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+        
+        guard let http = response as? HTTPURLResponse else {
+            print("[EmbedAPI] ERROR: Invalid response type")
             throw URLError(.badServerResponse)
         }
+        
+        print("[EmbedAPI] Response status code: \(http.statusCode)")
+        
+        guard 200..<300 ~= http.statusCode else {
+            print("[EmbedAPI] ERROR: Bad status code \(http.statusCode)")
+            if let responseString = String(data: data, encoding: .utf8) {
+                print("[EmbedAPI] Response body: \(responseString)")
+            }
+            throw URLError(.badServerResponse)
+        }
+        
         let decoded = try JSONDecoder().decode(PageInfoResponse.self, from: data)
         return decoded
     }
@@ -175,8 +213,46 @@ public enum EmbedAPI {
         
         // 根據 position 過濾 widgets
         let positionString = position.rawValue
+        let expectedFloatingMediaPosition: String? = {
+            switch position {
+            case .FIXED_BOTTOM_LEFT:
+                return "BottomLeft"
+            case .FIXED_BOTTOM_RIGHT:
+                return "BottomRight"
+            case .FIXED_TOP_LEFT:
+                return "TopLeft"
+            case .FIXED_TOP_RIGHT:
+                return "TopRight"
+            case .FIXED_CENTER_LEFT:
+                return "CenterLeft"
+            case .FIXED_CENTER_RIGHT:
+                return "CenterRight"
+            default:
+                return nil
+            }
+        }()
+        let isFixedPosition = expectedFloatingMediaPosition != nil
+        
         let filteredWidgets = response.pageInfo.filter { folderInfo in
-            // 檢查 embedLocation 是否匹配 position
+            let isFloatingMedia = folderInfo.layout?.lowercased() == "floatingmedia"
+            
+            // 如果是 FIXED_* 位置，需要匹配 FloatingMedia 的 floatingMediaPosition
+            if isFixedPosition {
+                if isFloatingMedia {
+                    let widgetFloatingMediaPosition = folderInfo.floatingMediaPosition
+                    return widgetFloatingMediaPosition == expectedFloatingMediaPosition
+                } else {
+                    // FIXED_* 位置只顯示 FloatingMedia widgets
+                    return false
+                }
+            }
+            
+            // 非 FIXED 位置：不允許顯示 FloatingMedia widgets
+            if isFloatingMedia {
+                return false
+            }
+            
+            // 正常過濾：根據 embedLocation 匹配（非 FIXED 位置，且非 FloatingMedia）
             if let embedLocation = folderInfo.embedLocation {
                 let embedLocationUpper = embedLocation.uppercased().trimmingCharacters(in: .whitespacesAndNewlines)
                 let positionStringTrimmed = positionString.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -199,6 +275,12 @@ public enum EmbedAPI {
 }
 
 // MARK: - Models
+/**
+ * @struct EmbedFolderInfo
+ * @description Information about an embed widget folder.
+ *              When layout is "FloatingMedia", floatingMediaPosition will be present with values:
+ *              "TopRight", "CenterRight", "BottomRight", "TopLeft", "CenterLeft", "BottomLeft"
+ */
 public struct EmbedFolderInfo: Identifiable, Codable, Hashable {
     public let folderId: String
     public let productId: String?
@@ -210,10 +292,14 @@ public struct EmbedFolderInfo: Identifiable, Codable, Hashable {
     public let timestamp: Int?
     public let folderName: String?
     public let layout: String?
+    public let setting: Int?
+    /// FloatingMedia position. Only present when layout is "FloatingMedia".
+    /// Possible values: "TopRight", "CenterRight", "BottomRight", "TopLeft", "CenterLeft", "BottomLeft"
+    public let floatingMediaPosition: String?
 
     public var id: String { folderId }
     
-    public init(folderId: String, productId: String? = nil, platform: String? = nil, productName: String? = nil, productUrl: String? = nil, productImage: String? = nil, embedLocation: String? = nil, timestamp: Int? = nil, folderName: String? = nil, layout: String? = nil) {
+    public init(folderId: String, productId: String? = nil, platform: String? = nil, productName: String? = nil, productUrl: String? = nil, productImage: String? = nil, embedLocation: String? = nil, timestamp: Int? = nil, folderName: String? = nil, layout: String? = nil, setting: Int? = nil, floatingMediaPosition: String? = nil) {
         self.folderId = folderId
         self.productId = productId
         self.platform = platform
@@ -224,6 +310,8 @@ public struct EmbedFolderInfo: Identifiable, Codable, Hashable {
         self.timestamp = timestamp
         self.folderName = folderName
         self.layout = layout
+        self.setting = setting
+        self.floatingMediaPosition = floatingMediaPosition
     }
 }
 
@@ -350,8 +438,36 @@ public class EmbedWidgetDataManager: ObservableObject {
     }
     
     /**
+     * @function getFloatingMediaPositionForEmbedPosition
+     * @description Maps EmbedPosition to corresponding floatingMediaPosition value.
+     *
+     * @param {EmbedPosition} position - The EmbedPosition to map.
+     *
+     * @returns {String?} The corresponding floatingMediaPosition value, or nil if not a FIXED position.
+     */
+    private func getFloatingMediaPositionForEmbedPosition(_ position: EmbedPosition) -> String? {
+        switch position {
+        case .FIXED_BOTTOM_LEFT:
+            return "BottomLeft"
+        case .FIXED_BOTTOM_RIGHT:
+            return "BottomRight"
+        case .FIXED_TOP_LEFT:
+            return "TopLeft"
+        case .FIXED_TOP_RIGHT:
+            return "TopRight"
+        case .FIXED_CENTER_LEFT:
+            return "CenterLeft"
+        case .FIXED_CENTER_RIGHT:
+            return "CenterRight"
+        default:
+            return nil
+        }
+    }
+    
+    /**
      * @function filterWidgetsByPosition
      * @description Filters widgets by position and sorts them by timestamp.
+     *              For FIXED_* positions, matches FloatingMedia widgets by floatingMediaPosition.
      *
      * @param {[EmbedFolderInfo]} widgets - Array of widgets to filter.
      * @param {EmbedPosition} position - The position to filter by.
@@ -360,19 +476,38 @@ public class EmbedWidgetDataManager: ObservableObject {
      */
     private func filterWidgetsByPosition(_ widgets: [EmbedFolderInfo], position: EmbedPosition) -> [EmbedFolderInfo] {
         let positionString = position.rawValue
-        let isFixedBottomLeft = position == EmbedPosition.FIXED_BOTTOM_LEFT
-        print("[EmbedWidgetDataManager] filterWidgetsByPosition - input: \(widgets.count) widgets, position: \(positionString), isFixedBottomLeft: \(isFixedBottomLeft)")
+        let expectedFloatingMediaPosition = getFloatingMediaPositionForEmbedPosition(position)
+        let isFixedPosition = expectedFloatingMediaPosition != nil
+        print("[EmbedWidgetDataManager] filterWidgetsByPosition - input: \(widgets.count) widgets, position: \(positionString), isFixedPosition: \(isFixedPosition), expectedFloatingMediaPosition: \(expectedFloatingMediaPosition ?? "nil")")
         
         let filteredWidgets = widgets.filter { folderInfo in
             let isFloatingMedia = folderInfo.layout?.lowercased() == "floatingmedia"
             
-            // 特殊處理：如果 position 是 FIXED_BOTTOM_LEFT，包含所有 FloatingMedia widgets
-            if isFixedBottomLeft && isFloatingMedia {
-                print("[EmbedWidgetDataManager] Filter: Including FloatingMedia widget \(folderInfo.folderId) for FIXED_BOTTOM_LEFT position")
-                return true
+            // 如果是 FIXED_* 位置，需要匹配 FloatingMedia 的 floatingMediaPosition
+            if isFixedPosition {
+                if isFloatingMedia {
+                    let widgetFloatingMediaPosition = folderInfo.floatingMediaPosition
+                    let matches = widgetFloatingMediaPosition == expectedFloatingMediaPosition
+                    if matches {
+                        print("[EmbedWidgetDataManager] Filter: Including FloatingMedia widget \(folderInfo.folderId) - floatingMediaPosition '\(widgetFloatingMediaPosition ?? "nil")' matches position \(positionString)")
+                    } else {
+                        print("[EmbedWidgetDataManager] Filter: Excluding FloatingMedia widget \(folderInfo.folderId) - floatingMediaPosition '\(widgetFloatingMediaPosition ?? "nil")' != expected '\(expectedFloatingMediaPosition ?? "nil")'")
+                    }
+                    return matches
+                } else {
+                    // FIXED_* 位置只顯示 FloatingMedia widgets
+                    print("[EmbedWidgetDataManager] Filter: Excluding non-FloatingMedia widget \(folderInfo.folderId) for FIXED position \(positionString)")
+                    return false
+                }
             }
             
-            // 正常過濾：根據 embedLocation 匹配
+            // 非 FIXED 位置：不允許顯示 FloatingMedia widgets
+            if isFloatingMedia {
+                print("[EmbedWidgetDataManager] Filter: Excluding FloatingMedia widget \(folderInfo.folderId) - FloatingMedia can only be displayed in FIXED_* positions")
+                return false
+            }
+            
+            // 正常過濾：根據 embedLocation 匹配（非 FIXED 位置，且非 FloatingMedia）
             if let embedLocation = folderInfo.embedLocation {
                 let embedLocationUpper = embedLocation.uppercased().trimmingCharacters(in: .whitespacesAndNewlines)
                 let positionStringTrimmed = positionString.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -492,21 +627,54 @@ public struct EmbedWidgetView: View {
                         print("[EmbedWidgetView] body - Rendering: folderInfos.isEmpty=true")
                     }
             } else {
-                // 過濾 widgets：如果 layout 為 FloatingMedia，只有 position 為 FIXED_BOTTOM_LEFT 時才顯示
+                // 過濾 widgets：對於 FIXED_* 位置，需要匹配 FloatingMedia 的 floatingMediaPosition
+                let expectedFloatingMediaPosition: String? = {
+                    switch position {
+                    case .FIXED_BOTTOM_LEFT:
+                        return "BottomLeft"
+                    case .FIXED_BOTTOM_RIGHT:
+                        return "BottomRight"
+                    case .FIXED_TOP_LEFT:
+                        return "TopLeft"
+                    case .FIXED_TOP_RIGHT:
+                        return "TopRight"
+                    case .FIXED_CENTER_LEFT:
+                        return "CenterLeft"
+                    case .FIXED_CENTER_RIGHT:
+                        return "CenterRight"
+                    default:
+                        return nil
+                    }
+                }()
+                let isFixedPosition = expectedFloatingMediaPosition != nil
+                
                 let filteredWidgets = folderInfos.filter { folderInfo in
                     let isFloatingMedia = folderInfo.layout?.lowercased() == "floatingmedia"
-                    let isFixedBottomLeft = position == EmbedPosition.FIXED_BOTTOM_LEFT
                     
-                    print("[EmbedWidgetView] Filtering widget - folderId: \(folderInfo.folderId), layout: \(folderInfo.layout ?? "nil"), position: \(position.rawValue), isFloatingMedia: \(isFloatingMedia), isFixedBottomLeft: \(isFixedBottomLeft)")
+                    print("[EmbedWidgetView] Filtering widget - folderId: \(folderInfo.folderId), layout: \(folderInfo.layout ?? "nil"), position: \(position.rawValue), isFloatingMedia: \(isFloatingMedia), isFixedPosition: \(isFixedPosition)")
                     
-                    // 如果是 FloatingMedia，必須是 FIXED_BOTTOM_LEFT 才顯示
-                    if isFloatingMedia {
-                        let shouldShow = isFixedBottomLeft
-                        print("[EmbedWidgetView] FloatingMedia widget - shouldShow: \(shouldShow)")
-                        return shouldShow
+                    // 如果是 FIXED_* 位置，需要匹配 FloatingMedia 的 floatingMediaPosition
+                    if isFixedPosition {
+                        if isFloatingMedia {
+                            let widgetFloatingMediaPosition = folderInfo.floatingMediaPosition
+                            let shouldShow = widgetFloatingMediaPosition == expectedFloatingMediaPosition
+                            print("[EmbedWidgetView] FloatingMedia widget - floatingMediaPosition: '\(widgetFloatingMediaPosition ?? "nil")', expected: '\(expectedFloatingMediaPosition ?? "nil")', shouldShow: \(shouldShow)")
+                            return shouldShow
+                        } else {
+                            // FIXED_* 位置只顯示 FloatingMedia widgets
+                            print("[EmbedWidgetView] Non-FloatingMedia widget for FIXED position - excluding")
+                            return false
+                        }
                     }
-                    // 如果不是 FloatingMedia，正常顯示
-                    print("[EmbedWidgetView] Non-FloatingMedia widget - showing")
+                    
+                    // 非 FIXED 位置：不允許顯示 FloatingMedia widgets
+                    if isFloatingMedia {
+                        print("[EmbedWidgetView] Excluding FloatingMedia widget - FloatingMedia can only be displayed in FIXED_* positions")
+                        return false
+                    }
+                    
+                    // 如果不是 FIXED 位置，且不是 FloatingMedia，正常顯示
+                    print("[EmbedWidgetView] Non-FIXED position widget (non-FloatingMedia) - showing")
                     return true
                 }
                 
